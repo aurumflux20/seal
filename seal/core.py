@@ -10,21 +10,25 @@ process's memory.
 
 Seal is that layer. Every irreversible action is:
 
-  1. PROPOSED  — an intent, content-addressed by (action, args-digest).
+  1. PROPOSED  — an intent, identified by a caller-supplied stable key
+                 (`charge:order-777`) or content-addressed from its args.
   2. ADMITTED  — exactly one caller wins the right to run it; a durable
                  Postgres row is the single source of truth, claimed with
                  INSERT ... ON CONFLICT DO NOTHING (one row, one winner).
   3. SEALED    — on success, a certificate is written: a content-addressed
-                 hash over intent + args digest + result digest + the previous
-                 cert's hash. Tampering breaks the chain by arithmetic.
-  4. REPLAYED  — every later caller for the same intent gets the sealed cert
+                 hash over the cert body + the previous cert's hash.
+                 Tampering breaks the chain by arithmetic.
+  4. WITNESSED — a provider adapter re-checks the outside world and appends a
+                 NEW cert upgrading the tier. The chain is append-only, so
+                 witnessing never rewrites history.
+  5. REPLAYED  — every later caller for the same intent gets the sealed cert
                  back and is told to STAND DOWN. The effect never re-runs.
 
 Honesty boundary, carried in the cert from v1 so v2 can't break the format:
-a Seal proves an action was ADMITTED exactly once at this gateway. It does NOT
-prove the world settled it — `world` is "unconfirmed" until a provider adapter
-says otherwise. "We admitted this once" and "Stripe took the money" are
-different claims, and Seal never conflates them.
+a SEALED cert proves an action was ADMITTED exactly once at this gateway. It
+does NOT prove the world settled it — `world` stays "unconfirmed" until a
+witness says otherwise. "We admitted this once" and "Stripe took the money"
+are different claims, and Seal never conflates them.
 """
 from __future__ import annotations
 
@@ -49,14 +53,58 @@ def _digest(obj: Any) -> str:
 
 GENESIS = "0" * 64
 
+# Cert tiers. SEALED is the only tier v1 can assert without a witness.
+TIER_SEALED = "SEALED"
+TIER_WORLD_FINAL = "WORLD_FINAL"
+TIER_WORLD_UNKNOWN = "WORLD_UNKNOWN"
+TIER_WORLD_DIVERGED = "WORLD_DIVERGED"
 
-def intent_id(action: str, args: Any) -> str:
-    """Content-addressed intent id: same action + same args → same intent.
+# `world` is the v1 field name, kept forever so the cert format never breaks.
+_TIER_TO_WORLD = {
+    TIER_SEALED: "unconfirmed",
+    TIER_WORLD_FINAL: "confirmed",
+    TIER_WORLD_UNKNOWN: "unknown",
+    TIER_WORLD_DIVERGED: "diverged",
+}
 
-    This is the whole ballgame. Too narrow and two genuinely different actions
-    collide (one silently vanishes). Too wide and a legitimate retry looks new
-    (double effect). The caller owns what goes into `args`; Seal only hashes it.
+
+class SealError(Exception):
+    """Base for every refusal Seal raises."""
+
+
+class NotFenceHolder(SealError, PermissionError):
+    """You are not the admitted caller for this intent (or it is already sealed)."""
+
+
+class PayloadConflict(SealError):
+    """Same intent key, different arguments.
+
+    This is a HARD failure on purpose. If a caller reuses `charge:order-777`
+    with a different amount, one of the two is wrong, and serving either the
+    cached result or a fresh execution would be a lie. Refusing loudly is the
+    only safe answer — the caller must pick a new key or fix the args.
     """
+
+
+class DomainFrozen(SealError):
+    """The domain is frozen by the divergence circuit breaker; nothing is admitted."""
+
+
+def intent_id(action: str, args: Any, key: str | None = None) -> str:
+    """Stable id for a logical action.
+
+    Two modes, and the difference matters:
+
+    * `key` given (RECOMMENDED for money): the intent is `action` + that key,
+      e.g. charge + "order-777". Args are NOT part of the identity, so a retry
+      whose amount was recomputed slightly differently is caught as a
+      PayloadConflict instead of silently becoming a second charge.
+    * `key` omitted: content-addressed from the args. Convenient, and safe when
+      args are genuinely deterministic — but a recomputed field makes a retry
+      look like a brand-new intent. Prefer an explicit key for irreversible work.
+    """
+    if key is not None:
+        return _digest({"action": action, "key": key})
     return _digest({"action": action, "args": args})
 
 
@@ -77,6 +125,10 @@ CREATE TABLE IF NOT EXISTS seal_intents (
     fence       TEXT NOT NULL,
     lease_until DOUBLE PRECISION NOT NULL,
     cert        JSONB,
+    domain      TEXT,
+    read_set    JSONB,
+    tier        TEXT,
+    graph_id    TEXT,
     created_at  DOUBLE PRECISION NOT NULL,
     updated_at  DOUBLE PRECISION NOT NULL
 );
@@ -88,11 +140,56 @@ CREATE TABLE IF NOT EXISTS seal_certs (
     body       JSONB NOT NULL,
     created_at DOUBLE PRECISION NOT NULL
 );
+CREATE TABLE IF NOT EXISTS seal_domains (
+    domain    TEXT PRIMARY KEY,
+    frozen    BOOLEAN NOT NULL,
+    reason    TEXT,
+    evidence  JSONB,
+    frozen_at DOUBLE PRECISION
+);
+CREATE TABLE IF NOT EXISTS seal_graphs (
+    graph_id   TEXT PRIMARY KEY,
+    state      TEXT NOT NULL,
+    created_at DOUBLE PRECISION NOT NULL,
+    updated_at DOUBLE PRECISION NOT NULL
+);
+CREATE TABLE IF NOT EXISTS seal_graph_children (
+    graph_id        TEXT NOT NULL,
+    child_key       TEXT NOT NULL,
+    action          TEXT NOT NULL,
+    args            JSONB NOT NULL,
+    required        BOOLEAN NOT NULL,
+    intent          TEXT,
+    state           TEXT NOT NULL,             -- pending|sealed|failed|compensated
+    compensates_key TEXT,
+    PRIMARY KEY (graph_id, child_key)
+);
+"""
+
+# Idempotent migrations for stores created by an earlier version.
+#
+# `CREATE TABLE IF NOT EXISTS` is a trap on upgrade: it silently does NOTHING
+# when the table already exists, so a customer who installs a new Seal over an
+# existing database keeps the old columns and every query fails at runtime.
+# This was caught by running the suite against a store built by the previous
+# version — exactly the upgrade path a real user takes, and exactly the path a
+# from-scratch test database would have hidden.
+MIGRATIONS = """
+ALTER TABLE seal_intents ADD COLUMN IF NOT EXISTS domain   TEXT;
+ALTER TABLE seal_intents ADD COLUMN IF NOT EXISTS read_set JSONB;
+ALTER TABLE seal_intents ADD COLUMN IF NOT EXISTS tier     TEXT;
+ALTER TABLE seal_intents ADD COLUMN IF NOT EXISTS graph_id TEXT;
 """
 
 
 class Seal:
-    def __init__(self, dsn: str, lease_sec: float = 30.0, connect_tries: int = 8):
+    # 8 tries (~1s of backoff) was not enough: under a 1,000-caller burst the
+    # accept queue stays saturated for seconds, and the caller that loses is
+    # sometimes the WINNER — which sealed nothing, so the run recorded zero
+    # certs. Safety held (one execution, everyone else failed safe), but a
+    # settlement rail that cannot record an effect under load is not shippable.
+    # 24 tries with capped backoff covers the observed saturation window.
+    def __init__(self, dsn: str, lease_sec: float = 30.0, connect_tries: int = 24):
         self.dsn = dsn
         self.lease_sec = lease_sec
         self._connect_tries = connect_tries
@@ -111,11 +208,7 @@ class Seal:
         # *open a socket* is always safe: it performs no effect and repeats no
         # write. (It is emphatically NOT a retry of the irreversible action —
         # that is what admission already made exactly-once.) After the budget
-        # is spent we raise, and the caller's only safe move is to stand down —
-        # which is the correct fail-safe when the store is genuinely
-        # unreachable. Production should put a real pool in front of this; the
-        # retry just stops a backlog spike from turning a won admission into a
-        # lost certificate.
+        # is spent we raise, and the caller's only safe move is to stand down.
         last: Exception | None = None
         delay = 0.02
         for _ in range(self._connect_tries):
@@ -131,45 +224,139 @@ class Seal:
         raise last
 
     def setup(self) -> None:
+        """Create the schema, and migrate a store made by an older version.
+
+        Safe to run on every boot: both halves are idempotent.
+        """
         with self._connect(autocommit=True) as c:
             c.execute(SCHEMA)
+            c.execute(MIGRATIONS)
+
+    # ── domain circuit breaker (B7) ───────────────────────────────────────
+    def freeze_domain(self, domain: str, reason: str, evidence: Any = None) -> None:
+        """Stop admitting anything in this domain. The rail stops the bleeding.
+
+        Freezing is deliberately blunt: once the world has contradicted the
+        ledger, we do not know which other intents in that domain are also
+        wrong, so guessing is worse than halting.
+        """
+        now = time.time()
+        with self._connect(autocommit=True) as c:
+            c.execute(
+                """
+                INSERT INTO seal_domains (domain, frozen, reason, evidence, frozen_at)
+                VALUES (%s, TRUE, %s, %s, %s)
+                ON CONFLICT (domain) DO UPDATE
+                   SET frozen=TRUE, reason=EXCLUDED.reason,
+                       evidence=EXCLUDED.evidence, frozen_at=EXCLUDED.frozen_at
+                """,
+                (domain, reason, json.dumps(evidence, default=str), now),
+            )
+
+    def unfreeze_domain(self, domain: str) -> None:
+        """Human-driven only: reconcile first, then release."""
+        with self._connect(autocommit=True) as c:
+            c.execute(
+                "UPDATE seal_domains SET frozen=FALSE WHERE domain=%s", (domain,)
+            )
+
+    def domain_frozen(self, domain: str) -> Optional[dict]:
+        with self._connect(autocommit=True) as c:
+            row = c.execute(
+                "SELECT reason, evidence, frozen_at FROM seal_domains WHERE domain=%s AND frozen",
+                (domain,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {"reason": row[0], "evidence": row[1], "frozen_at": row[2]}
 
     # ── admission: the atomic single-winner claim ─────────────────────────
-    def admit(self, action: str, args: Any) -> Admission:
-        iid = intent_id(action, args)
+    def admit(
+        self,
+        action: str,
+        args: Any,
+        key: str | None = None,
+        domain: str | None = None,
+        read_set: Any = None,
+        graph_id: str | None = None,
+    ) -> Admission:
+        iid = intent_id(action, args, key)
         args_dig = _digest(args)
         fence = uuid.uuid4().hex
         now = time.time()
         lease = now + self.lease_sec
 
+        if domain is not None:
+            frozen = self.domain_frozen(domain)
+            if frozen is not None:
+                raise DomainFrozen(
+                    f"domain {domain!r} is frozen: {frozen['reason']}"
+                )
+
         with self._connect(autocommit=True) as c:
             # One statement decides the winner. ON CONFLICT DO NOTHING means the
             # second concurrent caller inserts nothing and RETURNING is empty —
             # there is no check-then-act window for anyone to slip through.
+            # The freeze check above is a fast path with a good error message,
+            # but on its own it is check-then-act: a freeze landing between the
+            # check and this INSERT would let one more intent through, and the
+            # whole point of the breaker is that nothing else gets through.
+            # So the freeze test is repeated INSIDE the insert, where Postgres
+            # evaluates it atomically with the write.
             row = c.execute(
                 """
                 INSERT INTO seal_intents
-                    (intent, action, args_digest, state, fence, lease_until, created_at, updated_at)
-                VALUES (%s, %s, %s, 'open', %s, %s, %s, %s)
+                    (intent, action, args_digest, state, fence, lease_until,
+                     domain, read_set, tier, graph_id, created_at, updated_at)
+                SELECT %s, %s, %s, 'open', %s, %s, %s, %s, NULL, %s, %s, %s
+                 WHERE NOT EXISTS (
+                       SELECT 1 FROM seal_domains
+                        WHERE domain = %s AND frozen
+                 )
                 ON CONFLICT (intent) DO NOTHING
                 RETURNING intent
                 """,
-                (iid, action, args_dig, fence, lease, now, now),
+                (
+                    iid, action, args_dig, fence, lease, domain,
+                    json.dumps(read_set, default=str) if read_set is not None else None,
+                    graph_id, now, now,
+                    domain,
+                ),
             ).fetchone()
 
             if row is not None:
                 return Admission(fresh=True, intent=iid, fence=fence, cert=None)
 
+            # Nothing inserted: either the intent already exists, or the domain
+            # froze underneath us. Distinguish, so a frozen domain never gets
+            # misreported as a replay.
+            if domain is not None:
+                frozen = self.domain_frozen(domain)
+                if frozen is not None:
+                    raise DomainFrozen(
+                        f"domain {domain!r} is frozen: {frozen['reason']}"
+                    )
+
             # Someone else holds it. Read the current state to decide the answer.
             cur = c.execute(
-                "SELECT state, cert, lease_until, fence FROM seal_intents WHERE intent=%s",
+                "SELECT state, cert, lease_until, fence, args_digest FROM seal_intents WHERE intent=%s",
                 (iid,),
             ).fetchone()
             if cur is None:
                 # Raced with a delete — treat as fresh-eligible on one retry.
-                return self.admit(action, args)
+                return self.admit(action, args, key, domain, read_set, graph_id)
 
-            state, cert, lease_until, _held_fence = cur
+            state, cert, lease_until, _held_fence, stored_args = cur
+
+            # A7 — payload fingerprint. Same intent, different args, is never a
+            # replay: it is two different requests wearing one name. Refuse.
+            if stored_args != args_dig:
+                raise PayloadConflict(
+                    f"intent {iid[:12]}… was admitted with different arguments "
+                    f"(stored {stored_args[:12]}…, got {args_dig[:12]}…). "
+                    "Use a distinct intent key, or send the original arguments."
+                )
+
             if state == "sealed":
                 return Admission(fresh=False, intent=iid, fence="", cert=cert)
             if state == "open" and lease_until < now:
@@ -189,55 +376,238 @@ class Seal:
             # Held and alive, or lost the reclaim race, or failed/fenced.
             return Admission(fresh=False, intent=iid, fence="", cert=cert)
 
+    # ── A3 · heartbeat: extend the lease while a long effect runs ─────────
+    def heartbeat(self, intent: str, fence: str) -> float:
+        """Push the lease out. Only the fence holder may, and only while open.
+
+        Without this, an effect slower than `lease_sec` gets its claim stolen
+        mid-flight and a second caller runs it — the exact double we exist to
+        prevent. Returns the new lease deadline.
+        """
+        now = time.time()
+        new_lease = now + self.lease_sec
+        with self._connect(autocommit=True) as c:
+            row = c.execute(
+                """
+                UPDATE seal_intents SET lease_until=%s, updated_at=%s
+                 WHERE intent=%s AND fence=%s AND state='open'
+                RETURNING lease_until
+                """,
+                (new_lease, now, intent, fence),
+            ).fetchone()
+        if row is None:
+            raise NotFenceHolder("not the fence holder, or no longer open")
+        return row[0]
+
+    # ── the append-only cert chain ────────────────────────────────────────
+    # A hash chain is a strictly serial structure: "read the head, then append"
+    # is only correct if nobody else appends in between. Without this lock, two
+    # DIFFERENT intents sealing at the same instant both read the same head and
+    # both write it as their prev_hash — producing a fork that fails
+    # verify_chain() forever. The 1000-thread storm never caught it because only
+    # ONE caller wins and seals there; the bug needs concurrent *distinct*
+    # intents, which is the ordinary production shape. Caught by probing for it
+    # directly. Transaction-scoped, so it releases on commit or rollback.
+    _CHAIN_LOCK_KEY = 0x5EA1C8A17
+
+    def _append_cert(self, c, body: dict) -> dict:
+        """Append one cert. Hash covers the whole body + the previous hash.
+
+        The chain is append-only by design: a witness NEVER rewrites a sealed
+        cert, it appends a new one. That is what keeps "tamper-evident" true —
+        if upgrading a tier meant editing history, the guarantee would be gone.
+
+        MUST be called inside an open transaction — the advisory lock below is
+        transaction-scoped and would release immediately under autocommit.
+        """
+        c.execute("SELECT pg_advisory_xact_lock(%s)", (self._CHAIN_LOCK_KEY,))
+        prev = c.execute(
+            "SELECT hash FROM seal_certs ORDER BY seq DESC LIMIT 1"
+        ).fetchone()
+        prev_hash = prev[0] if prev else GENESIS
+        body = {**body, "prev_hash": prev_hash}
+        cert_hash = _digest(body)
+        cert = {**body, "hash": cert_hash}
+        c.execute(
+            "INSERT INTO seal_certs (intent, hash, prev_hash, body, created_at) "
+            "VALUES (%s,%s,%s,%s,%s)",
+            (body["intent"], cert_hash, prev_hash, json.dumps(cert, default=str),
+             body.get("at", time.time())),
+        )
+        return cert
+
     # ── seal: write the certificate after the effect ran ──────────────────
-    def seal(self, intent: str, fence: str, result: Any) -> dict:
+    def seal(
+        self,
+        intent: str,
+        fence: str,
+        result: Any,
+        compensates_cert: str | None = None,
+        graph_id: str | None = None,
+    ) -> dict:
         now = time.time()
         with self._connect(autocommit=True) as c:
             with c.transaction():
                 # Only the fence holder may seal, and only while still open.
                 held = c.execute(
-                    "SELECT args_digest FROM seal_intents WHERE intent=%s AND fence=%s AND state='open' FOR UPDATE",
+                    "SELECT args_digest, action, read_set, graph_id FROM seal_intents "
+                    "WHERE intent=%s AND fence=%s AND state='open' FOR UPDATE",
                     (intent, fence),
                 ).fetchone()
                 if held is None:
-                    raise PermissionError("not the fence holder, or already sealed")
-                args_digest = held[0]
-
-                prev = c.execute(
-                    "SELECT hash FROM seal_certs ORDER BY seq DESC LIMIT 1"
-                ).fetchone()
-                prev_hash = prev[0] if prev else GENESIS
+                    raise NotFenceHolder("not the fence holder, or already sealed")
+                args_digest, action, read_set, stored_graph = held
 
                 body = {
                     "intent": intent,
+                    "action": action,
                     "args_digest": args_digest,
                     "result_digest": _digest(result),
-                    "world": "unconfirmed",   # v1 never claims world settlement
-                    "prev_hash": prev_hash,
+                    "tier": TIER_SEALED,
+                    "world": _TIER_TO_WORLD[TIER_SEALED],  # v1 field, never dropped
+                    "read_set": read_set,
+                    "compensates_cert": compensates_cert,
+                    "graph_id": graph_id or stored_graph,
                     "at": now,
                 }
-                cert_hash = _digest(body)
-                cert = {**body, "hash": cert_hash}
-
+                cert = self._append_cert(c, body)
                 c.execute(
-                    "INSERT INTO seal_certs (intent, hash, prev_hash, body, created_at) VALUES (%s,%s,%s,%s,%s)",
-                    (intent, cert_hash, prev_hash, json.dumps(cert), now),
-                )
-                c.execute(
-                    "UPDATE seal_intents SET state='sealed', cert=%s, updated_at=%s WHERE intent=%s",
-                    (json.dumps(cert), now, intent),
+                    "UPDATE seal_intents SET state='sealed', cert=%s, tier=%s, updated_at=%s "
+                    "WHERE intent=%s",
+                    (json.dumps(cert, default=str), TIER_SEALED, now, intent),
                 )
                 return cert
 
     def fail(self, intent: str, fence: str, reason: str) -> None:
-        """Release a claim so the intent can be legitimately retried later."""
-        now = time.time()
+        """Release a claim so the intent can be legitimately retried later.
+
+        Only safe when nothing irreversible happened. If the effect may have
+        fired, do NOT call this — leave the claim and witness it instead.
+        """
         with self._connect(autocommit=True) as c:
-            # Delete the open row so the same intent is fresh-eligible again.
             c.execute(
                 "DELETE FROM seal_intents WHERE intent=%s AND fence=%s AND state='open'",
                 (intent, fence),
             )
+
+    # ── status ────────────────────────────────────────────────────────────
+    def get(self, intent: str) -> Optional[dict]:
+        with self._connect(autocommit=True) as c:
+            row = c.execute(
+                "SELECT intent, action, state, tier, cert, domain, graph_id "
+                "FROM seal_intents WHERE intent=%s",
+                (intent,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "intent": row[0], "action": row[1], "state": row[2],
+            "tier": row[3], "cert": row[4], "domain": row[5], "graph_id": row[6],
+        }
+
+    def certs_for(self, intent: str) -> list[dict]:
+        with self._connect(autocommit=True) as c:
+            rows = c.execute(
+                "SELECT body FROM seal_certs WHERE intent=%s ORDER BY seq ASC",
+                (intent,),
+            ).fetchall()
+        return [r[0] for r in rows]
+
+    # ── B2–B7 · world witness, cert tiers, circuit breaker ────────────────
+    def witness(self, intent: str, witness, freeze_on_diverge: bool = True) -> dict:
+        """Ask the outside world what really happened, and append the verdict.
+
+        This never edits the SEALED cert — it appends a new one carrying the
+        upgraded tier, so the chain stays append-only and tamper-evidence
+        survives. A DIVERGED verdict trips the circuit breaker for the
+        intent's domain: we now know the ledger and the world disagree, and we
+        do not know what else in that domain is wrong, so the rail halts.
+        """
+        from .witness import ABSENT, CONFIRMED_ONE, MULTIPLE, UNKNOWN
+
+        rec = self.get(intent)
+        if rec is None:
+            raise SealError(f"unknown intent {intent[:12]}…")
+        if rec["state"] != "sealed":
+            raise SealError(
+                "only a sealed intent can be witnessed — there is nothing to "
+                "confirm until the effect has been sealed"
+            )
+
+        result = witness.look(rec)
+        tier = {
+            CONFIRMED_ONE: TIER_WORLD_FINAL,
+            MULTIPLE: TIER_WORLD_DIVERGED,
+            # Sealed here but nothing there: the ledger claims an effect the
+            # world denies. That is a contradiction, not an absence.
+            ABSENT: TIER_WORLD_DIVERGED,
+            UNKNOWN: TIER_WORLD_UNKNOWN,
+        }[result.state]
+
+        now = time.time()
+        with self._connect(autocommit=True) as c:
+            with c.transaction():
+                sealed = c.execute(
+                    "SELECT cert, action, args_digest FROM seal_intents WHERE intent=%s FOR UPDATE",
+                    (intent,),
+                ).fetchone()
+                prior_cert = sealed[0]
+                body = {
+                    "intent": intent,
+                    "action": sealed[1],
+                    "args_digest": sealed[2],
+                    "tier": tier,
+                    "world": _TIER_TO_WORLD[tier],
+                    "witness_state": result.state,
+                    "witness_count": result.count,
+                    "witness_evidence": result.evidence,
+                    "parent_cert": prior_cert.get("hash") if prior_cert else None,
+                    "at": now,
+                }
+                cert = self._append_cert(c, body)
+                c.execute(
+                    "UPDATE seal_intents SET tier=%s, updated_at=%s WHERE intent=%s",
+                    (tier, now, intent),
+                )
+
+        if tier == TIER_WORLD_DIVERGED and freeze_on_diverge and rec["domain"]:
+            self.freeze_domain(
+                rec["domain"],
+                f"witness returned {result.state} for intent {intent[:12]}…",
+                evidence=result.evidence,
+            )
+        return cert
+
+    # ── B8 · incident receipt ─────────────────────────────────────────────
+    def incident_receipt(self, intent: str) -> dict:
+        """Everything an auditor needs about one intent, in one exportable blob.
+
+        Deliberately self-contained and self-checking: it carries the full cert
+        chain for the intent plus a fresh chain verification, so the reader can
+        confirm it without calling us and without trusting this process.
+        """
+        rec = self.get(intent)
+        if rec is None:
+            raise SealError(f"unknown intent {intent[:12]}…")
+        certs = self.certs_for(intent)
+        chain = self.verify_chain()
+        domain_state = self.domain_frozen(rec["domain"]) if rec["domain"] else None
+        receipt = {
+            "intent": rec["intent"],
+            "action": rec["action"],
+            "state": rec["state"],
+            "tier": rec["tier"],
+            "domain": rec["domain"],
+            "domain_frozen": domain_state,
+            "certs": certs,
+            "chain_verified": chain["ok"],
+            "chain_detail": chain,
+            "generated_at": time.time(),
+        }
+        receipt["receipt_digest"] = _digest(
+            {k: v for k, v in receipt.items() if k != "generated_at"}
+        )
+        return receipt
 
     # ── audit: verify the whole cert chain from the store alone ───────────
     def verify_chain(self) -> dict:
@@ -249,9 +619,11 @@ class Seal:
         for i, (seq, h, ph, body) in enumerate(rows):
             if ph != prev:
                 return {"ok": False, "at": i, "why": "chain link broken"}
-            recomputed = _digest({k: body[k] for k in
-                                  ("intent", "args_digest", "result_digest", "world", "prev_hash", "at")})
-            if recomputed != h or body["hash"] != h:
+            # Hash covers every field except the hash itself. Deriving the set
+            # from the body (rather than a hardcoded tuple) means adding a cert
+            # field can never silently drop it out of the tamper check.
+            recomputed = _digest({k: v for k, v in body.items() if k != "hash"})
+            if recomputed != h or body.get("hash") != h:
                 return {"ok": False, "at": i, "why": "cert altered since written"}
             prev = h
         return {"ok": True, "certs": len(rows)}

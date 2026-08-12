@@ -1,7 +1,7 @@
 [project]
 name = "seal-kernel"
-version = "0.1.0"
-description = "Exactly-once admission for irreversible agent actions, across processes, on a shared Postgres — with a tamper-evident certificate chain."
+version = "0.2.0"
+description = "Exactly-once admission for irreversible agent actions, world-confirmed settlement, and effect graphs with compensating seals — on a shared Postgres, with a tamper-evident certificate chain."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }

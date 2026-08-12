@@ -5,7 +5,18 @@ The honesty boundary is in the cert itself: `world: "unconfirmed"` until a
 provider adapter confirms settlement. Admission and settlement are different
 claims; Seal never conflates them.
 """
-from .core import Admission, Seal, intent_id
+from .core import (
+    Admission,
+    DomainFrozen,
+    NotFenceHolder,
+    PayloadConflict,
+    Seal,
+    SealError,
+    intent_id,
+)
 
-__all__ = ["Seal", "Admission", "intent_id"]
-__version__ = "0.1.0"
+__all__ = [
+    "Seal", "Admission", "intent_id",
+    "SealError", "PayloadConflict", "DomainFrozen", "NotFenceHolder",
+]
+__version__ = "0.2.0"

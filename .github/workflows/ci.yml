@@ -31,6 +31,8 @@ jobs:
       - run: pip install -e . pytest
       - name: unit + attack suite
         run: python -m pytest tests/ -q
+      - name: end-to-end demos (exactly-once · divergence freeze · compensation)
+        run: python demo.py
       - name: storm proof (500 concurrent, fresh runner)
         # 500 not 1000 on CI: a shared runner's connection ceiling is lower than
         # a dev machine's. The race being broken is identical; STORM-PROOF.md
