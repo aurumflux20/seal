@@ -1,0 +1,38 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: seal
+          POSTGRES_PASSWORD: seal
+          POSTGRES_DB: seal
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U seal"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      SEAL_DSN: host=localhost port=5432 user=seal password=seal dbname=seal
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e . pytest
+      - name: unit + attack suite
+        run: python -m pytest tests/ -q
+      - name: storm proof (500 concurrent, fresh runner)
+        # 500 not 1000 on CI: a shared runner's connection ceiling is lower than
+        # a dev machine's. The race being broken is identical; STORM-PROOF.md
+        # records the 1,000-thread runs. The exit code is the verdict.
+        run: python storm.py --n 500
