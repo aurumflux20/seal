@@ -1,4 +1,4 @@
-# SEAL v1 — exactly-once proof (re-run Aug 12 2026, packaged build)
+# SEAL — proof of all three layers (Aug 12 2026, v0.2.0)
 
 **Claim tested:** across many real, independent workers sharing ONE Postgres,
 an irreversible action admitted through Seal executes EXACTLY ONCE, and every
@@ -23,16 +23,27 @@ Representative run (run 1):
 - post-seal wave (50): all 50 replayed, 0 re-executed
 - cert chain: VERIFIED from the store alone (1 cert)
 
-**Also green:** the 13-test attack suite (`tests/test_seal.py`) — wrong-fence seal
-rejected, double-seal rejected, dead-lease reclaim invalidates the zombie fence,
-edited/deleted/re-hashed certs all break the chain, cert never claims world
-settlement. Verified from a **fresh clone + fresh venv**, outside the dev tree.
+**Also green, all from a FRESH CLONE on a FRESH DATABASE, every verdict by exit code:**
+- **56 tests** across three layers — wrong-fence seal rejected, double-seal
+  rejected, dead-lease reclaim invalidates the zombie fence, edited/deleted/
+  re-hashed certs all break the chain, same-key-different-args refused as a
+  conflict, `WORLD_UNKNOWN` never collapsing to absent, a frozen domain
+  refusing admission, a graph refusing FINAL while a child is unconfirmed, and
+  a compensation that stays single-fire under 20 concurrent callers.
+- **`demo.py`** — 11 measured checks: two agents double-click → one charge;
+  divergence → domain frozen + further spend refused; checkout fails halfway →
+  exactly one sealed refund, `GRAPH_COMPENSATED`, chain still verifying.
+- **`seal-mcp`** — driven as a subprocess over real JSON-RPC stdio, not by
+  importing its functions, so the handshake and framing are actually proven.
+- **`python -m seal verify`** — chain audited from the DSN alone, exit 0.
 
 **What is proven:** exactly-once across processes on a shared durable store, plus
 a tamper-evident cert chain. The mechanism is `INSERT ... ON CONFLICT DO NOTHING`
 — one row, one winner, no check-then-act window.
 
-**Two robustness fixes were caught by this re-run and are in the shipped code:**
+**SIX real bugs were caught by auditing and demoing rather than assuming, and
+all six are fixed in the shipped code. Every one was found by attacking our own
+work; none surfaced from a passing suite:**
 1. **SQL_ASCII stores returned `bytes` for TEXT.** A Postgres initialised under a
    C locale is SQL_ASCII, and psycopg then hands back `bytes` for every TEXT
    column — args_digest and the cert body silently became unserialisable. Fixed
@@ -45,6 +56,31 @@ a tamper-evident cert chain. The mechanism is `INSERT ... ON CONFLICT DO NOTHING
    which admission already made exactly-once. Unreachable dropped 777 → 17 and
    the SAFETY property held throughout: an unreachable store is always fail-safe,
    never a double-charge.
+
+3. **The cert chain forked under concurrent seals.** Two DIFFERENT intents
+   sealing at the same instant both read the same chain head and both wrote it
+   as `prev_hash` — a fork that fails verification permanently, voiding the
+   tamper-evidence guarantee in the ordinary production shape. **The
+   1,000-thread storm could never catch this**: only one caller wins and seals
+   there. Found by probing for it directly. Fixed with a transaction-scoped
+   advisory lock around read-head-then-append.
+4. **The divergence circuit breaker was raceable.** The freeze was checked
+   before the INSERT, so a freeze landing in between let one more irreversible
+   action through — in the very mechanism whose job is to stop exactly that.
+   The freeze test now runs inside the INSERT, evaluated atomically with the
+   write.
+5. **Upgrading silently did nothing.** `CREATE TABLE IF NOT EXISTS` is a no-op
+   on an existing table, so a customer installing a new Seal over an existing
+   database kept the old columns and hit runtime errors. Fixed with idempotent
+   migrations, then proven by building a real v0.1.0-schema store and upgrading
+   it — the path a user actually takes, and the one a from-scratch test
+   database hides.
+6. **A retried compensation got stuck non-terminal.** Re-calling `compensate()`
+   set the graph to `COMPENSATING`, then returned early on the already-done
+   path and never finalised — leaving a retried refund permanently mid-flight.
+   Idempotent has to mean the STATE repeats, not just the side effect. **Found
+   by the end-to-end demo, which the unit tests had missed** — they asserted
+   the refund ran once and stopped there.
 
 **Honest limits (measured, not hidden):**
 1. Raw one-connection-per-call still isn't how you'd run this in production — put
