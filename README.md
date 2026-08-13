@@ -2,6 +2,9 @@
 
 **Exactly-once admission for irreversible agent actions, across processes.**
 
+> Not an engineer? Read [docs/PLAIN-ENGLISH.md](docs/PLAIN-ENGLISH.md) instead —
+> the same thing with no jargon, including what we can't do.
+
 Two different agents, on two different machines, both decide to charge order 123
 at the same instant. In-process idempotency can't help — the guard has to live in
 a store both agents talk to, and the winner has to be decided *atomically there*.
@@ -197,6 +200,19 @@ governance decisions the same way it covers what actually ran.
 Backward-compatible by design: a path nobody ran `set_thresholds()` on never
 triggers graduated clearance, even if `propose()` is called with an amount —
 existing budget-only integrations are unaffected.
+
+Run the whole story end to end — no payment provider needed, nothing charged:
+
+```bash
+python approval_demo.py
+```
+
+A $200 purchase clears on its own; $12,000 is refused until two *distinct*
+humans approve; the requester is refused when they try to approve their own;
+a duplicate vote from the same approver is refused; one reject is terminal;
+$250,000 is never automatic; and one `revoke` stops even the $200 path. It
+ends on the Range Report, which states approvals in money — approved and
+rejected totals — rather than a count of event kinds.
 
 ## What a Seal cert does and does not claim
 
