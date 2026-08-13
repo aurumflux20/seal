@@ -40,6 +40,21 @@ pip install -e . && export SEAL_DSN="host=... dbname=seal"
 python storm.py --n 1000
 ```
 
+## Test YOUR server, not just ours
+
+The exact harness above, generalized into a standalone file with zero
+dependency on this repo — copy it, point it at your own write-bearing tool,
+and find out for yourself:
+
+```bash
+python range_safety_test.py --n 1000
+```
+
+It demonstrates itself against a known-unsafe target and a known-safe one
+before you ever run it for real, so a pass means something. Full writeup,
+including the three ways an early version of this test lied to us before it
+was fixed: [docs/RANGE-SAFETY-TEST.md](docs/RANGE-SAFETY-TEST.md).
+
 ## Usage
 
 ```python
