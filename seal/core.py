@@ -216,6 +216,43 @@ CREATE TABLE IF NOT EXISTS seal_proof (
     at          DOUBLE PRECISION NOT NULL
 );
 CREATE INDEX IF NOT EXISTS seal_proof_path_at ON seal_proof (path, at DESC);
+CREATE TABLE IF NOT EXISTS seal_thresholds (
+    path               TEXT PRIMARY KEY,
+    auto_ceiling       DOUBLE PRECISION NOT NULL,  -- <= this: normal Clearance applies
+    dual_ceiling       DOUBLE PRECISION NOT NULL,  -- <= this: needs 2 distinct approvers
+                                                    -- > this: ALWAYS_HUMAN, same mechanic,
+                                                    -- never eligible for AUTO regardless of policy
+    required_approvers INTEGER NOT NULL DEFAULT 2,
+    updated_at         DOUBLE PRECISION NOT NULL,
+    updated_by         TEXT
+);
+CREATE TABLE IF NOT EXISTS seal_approvals (
+    id           TEXT PRIMARY KEY,
+    intent       TEXT NOT NULL,
+    path         TEXT NOT NULL,
+    amount       DOUBLE PRECISION NOT NULL,
+    maker        TEXT NOT NULL,
+    tier         TEXT NOT NULL,             -- DUAL | ALWAYS_HUMAN
+    state        TEXT NOT NULL,             -- pending | approved | rejected | expired
+    required     INTEGER NOT NULL,
+    created_at   DOUBLE PRECISION NOT NULL,
+    expires_at   DOUBLE PRECISION NOT NULL,
+    decided_at   DOUBLE PRECISION,
+    consumed_at  DOUBLE PRECISION           -- set once spent by execute(); single-use
+);
+CREATE TABLE IF NOT EXISTS seal_approval_votes (
+    id           BIGSERIAL PRIMARY KEY,
+    approval_id  TEXT NOT NULL,
+    approver     TEXT NOT NULL,
+    decision     TEXT NOT NULL,             -- approve | reject
+    at           DOUBLE PRECISION NOT NULL,
+    sig          TEXT NOT NULL,
+    -- The property that makes maker-checker real rather than advisory: one
+    -- approver cannot be counted twice toward the required count. This is
+    -- enforced by Postgres, not application logic, so it holds even if two
+    -- votes from the same approver are submitted in the same instant.
+    UNIQUE (approval_id, approver)
+);
 CREATE TABLE IF NOT EXISTS seal_events (
     id      BIGSERIAL PRIMARY KEY,
     path    TEXT,

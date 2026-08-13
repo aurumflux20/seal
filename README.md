@@ -147,6 +147,42 @@ do not become a vault ourselves. Honest limit: a process on the same host that
 can read the gateway's own environment can still steal the secret. This raises
 the bar to "steal from the vault," not to physical impossibility.
 
+## Graduated Clearance — maker-checker for the amounts that matter
+
+Binary CLEARED is enough for a $5 API call. It is not what a finance org signs
+off on for a $50,000 payout — they sign off on segregation of duties: the
+person who proposes a spend is never the person who approves it, on the
+record. Graduated Clearance adds thresholds on top of Clearance:
+
+```python
+from seal.graduated import GraduatedClearance, APPROVE
+
+gc = GraduatedClearance(seal)
+gc.set_thresholds("payout", auto_ceiling=100, dual_ceiling=10_000, required_approvers=2)
+
+# amount 50   -> AUTO, ordinary Clearance applies
+# amount 5000 -> DUAL, needs 2 distinct human approvals before it can execute
+r = gc.request("payout", 5000, maker="alice", intent=intent)
+gc.add_vote(r["id"], "bob", APPROVE)
+gc.add_vote(r["id"], "carol", APPROVE)   # now APPROVED — a THIRD person, not alice
+```
+
+Wired into the gateway: `Gateway.propose(..., amount=X)` on a path with
+thresholds configured returns `{"status": "needs_approval", "tier": "DUAL"}`
+instead of a ticket until a satisfied `approval_id` is supplied. The maker
+cannot approve their own request — enforced in code, not policy — and one
+approver cannot be counted twice even under a genuine concurrent race, because
+it's a Postgres `UNIQUE` constraint on (approval, approver), not an
+app-level check. A single reject is terminal. An approval authorises exactly
+one execution and is bound to the exact intent it was requested for. Every
+decided approval — approved or rejected, with every vote — is appended into
+the *same* hash chain the execution certs live in, so `seal verify` covers
+governance decisions the same way it covers what actually ran.
+
+Backward-compatible by design: a path nobody ran `set_thresholds()` on never
+triggers graduated clearance, even if `propose()` is called with an amount —
+existing budget-only integrations are unaffected.
+
 ## What a Seal cert does and does not claim
 
 A cert proves the action was **admitted exactly once at this gateway** and that

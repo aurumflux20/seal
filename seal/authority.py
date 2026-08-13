@@ -140,12 +140,15 @@ class Gateway:
     # ── the agent-facing surface ──────────────────────────────────────────
     def propose(self, path: str, args: Any, key: str | None = None,
                 domain: str | None = None, budget_key: str | None = None,
-                amount: float | None = None) -> dict:
-        """An agent asks to act. It gets a ticket, a replayed result, or a no.
+                amount: float | None = None, approval_id: str | None = None) -> dict:
+        """An agent asks to act. It gets a ticket, a replayed result, a no, or
+        (for amounts above the auto-clear ceiling) a request to go get a
+        satisfied maker-checker approval first.
 
         Order is deliberate: clearance (may this path run at all?) → admission
-        (is this intent already taken?) → budget (is there headroom?). The
-        cheapest and most absolute refusals come first.
+        (is this intent already taken?) → graduated approval (does this AMOUNT
+        need a second human?) → budget (is there headroom?). The cheapest and
+        most absolute refusals come first.
         """
         if path not in self._executors:
             raise NoSuchExecutor(f"no executor registered for path {path!r}")
@@ -157,6 +160,52 @@ class Gateway:
             if adm.cert is not None:
                 return {"status": "already_done", "intent": adm.intent, "cert": adm.cert}
             return {"status": "in_flight", "intent": adm.intent}
+
+        # GRADUATED CLEARANCE — only meaningful when the caller states an
+        # amount. A path's binary CLEARED does not, on its own, authorise a
+        # single amount above the auto-ceiling; that needs a second human. If
+        # this branch bails, release the admission (self.seal.fail) rather
+        # than leaving a claimed-but-unusable intent sitting open.
+        if amount is not None:
+            from .graduated import (
+                AUTO, APPROVED, GraduatedClearance, GraduatedError,
+                ApprovalConsumed, ApprovalNotSatisfied,
+            )
+            gc = GraduatedClearance(self.seal)
+            # Graduated clearance only engages for a path an operator has
+            # explicitly configured with set_thresholds(). Passing `amount` to
+            # propose() is also how ordinary Budget reservations work, and
+            # those callers never opted into maker-checker — treating every
+            # unconfigured path as ALWAYS_HUMAN here would silently block
+            # every existing budget-only integration the moment it named an
+            # amount. tier_for()'s own "no config -> ALWAYS_HUMAN" default is
+            # still correct for a caller asking it directly; it is simply not
+            # this gateway's job to apply that opinion to paths nobody asked
+            # it to guard.
+            configured = gc.get_thresholds(path) is not None
+            tier = gc.tier_for(path, amount) if configured else AUTO
+            if configured and tier != AUTO:
+                if approval_id is None:
+                    self.seal.fail(adm.intent, adm.fence, "needs graduated approval")
+                    return {"status": "needs_approval", "intent": adm.intent, "tier": tier}
+                appr = gc.get(approval_id)
+                mismatch = (appr["intent"] != adm.intent or appr["path"] != path
+                           or appr["amount"] != amount)
+                if mismatch:
+                    self.seal.fail(adm.intent, adm.fence, "approval does not match this proposal")
+                    raise GraduatedError(
+                        "approval_id does not match this exact intent/path/amount"
+                    )
+                if appr["state"] != APPROVED:
+                    self.seal.fail(adm.intent, adm.fence, f"approval is {appr['state']}")
+                    raise ApprovalNotSatisfied(
+                        f"approval {approval_id!r} is {appr['state']!r}, needs {appr['required']} "
+                        f"distinct approvals, has {appr['approve_count']}"
+                    )
+                if appr["consumed_at"] is not None:
+                    self.seal.fail(adm.intent, adm.fence, "approval already consumed")
+                    raise ApprovalConsumed(f"approval {approval_id!r} already spent")
+                gc.consume(approval_id)   # single-use, marked atomically before minting
 
         # budget is reserved BEFORE the ticket is issued: a ticket that cannot
         # be funded should never exist.
