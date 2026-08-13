@@ -46,6 +46,40 @@ import psycopg
 # JSON with sorted keys + no whitespace. Good enough for a single-language
 # store; the cross-language RFC 8785 kernel is the upgrade if two languages
 # ever seal into the same chain.
+def _ascii_safe(obj):
+    """Recursively replace non-ASCII characters in strings.
+
+    A Postgres created under a C locale is SQL_ASCII, and it rejects a JSONB
+    value containing non-ASCII -- INCLUDING a \\uXXXX escape, which it still
+    tries to translate into the server encoding and fails with
+    UntranslatableCharacter. So ensure_ascii is not enough: the characters must
+    be gone from the data, not merely escaped.
+
+    A settlement kernel must never fail to record an event because a customer
+    initialised their database with a different encoding -- losing the audit
+    trail is far worse than losing a typographic dash. Characters are swapped
+    for a close ASCII equivalent where one exists, and dropped otherwise.
+    """
+    if isinstance(obj, str):
+        if obj.isascii():
+            return obj
+        swaps = {"\u2014": "-", "\u2013": "-", "\u2018": "'", "\u2019": "'",
+                 "\u201c": '"', "\u201d": '"', "\u2026": "...",
+                 "\u2192": "->", "\u00a0": " "}
+        out = "".join(swaps.get(ch, ch) for ch in obj)
+        return out.encode("ascii", "ignore").decode("ascii")
+    if isinstance(obj, dict):
+        return {_ascii_safe(k): _ascii_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_ascii_safe(v) for v in obj]
+    return obj
+
+
+def _jsonb(obj) -> str:
+    """Serialize for JSONB storage on any Postgres encoding. See _ascii_safe."""
+    return json.dumps(_ascii_safe(obj), default=str, ensure_ascii=True)
+
+
 def _digest(obj: Any) -> str:
     raw = json.dumps(obj, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(raw.encode()).hexdigest()
@@ -164,6 +198,33 @@ CREATE TABLE IF NOT EXISTS seal_graph_children (
     compensates_key TEXT,
     PRIMARY KEY (graph_id, child_key)
 );
+CREATE TABLE IF NOT EXISTS seal_clearance (
+    path        TEXT PRIMARY KEY,          -- the irreversible tool path, e.g. "charge"
+    status      TEXT NOT NULL,             -- CLEARED | HOLD | REVOKED
+    reason      TEXT,
+    max_proof_age_sec DOUBLE PRECISION,    -- CLEARED expires without fresh green proof
+    updated_at  DOUBLE PRECISION NOT NULL,
+    updated_by  TEXT
+);
+CREATE TABLE IF NOT EXISTS seal_proof (
+    id          BIGSERIAL PRIMARY KEY,
+    path        TEXT NOT NULL,
+    green       BOOLEAN NOT NULL,
+    storm_n     INTEGER,
+    executions  INTEGER,
+    detail      JSONB,
+    at          DOUBLE PRECISION NOT NULL
+);
+CREATE INDEX IF NOT EXISTS seal_proof_path_at ON seal_proof (path, at DESC);
+CREATE TABLE IF NOT EXISTS seal_events (
+    id      BIGSERIAL PRIMARY KEY,
+    path    TEXT,
+    kind    TEXT NOT NULL,                 -- admitted|blocked|replayed|healed|diverged|revoked
+    intent  TEXT,
+    detail  JSONB,
+    at      DOUBLE PRECISION NOT NULL
+);
+CREATE INDEX IF NOT EXISTS seal_events_at ON seal_events (at DESC);
 """
 
 # Idempotent migrations for stores created by an earlier version.
@@ -250,7 +311,7 @@ class Seal:
                    SET frozen=TRUE, reason=EXCLUDED.reason,
                        evidence=EXCLUDED.evidence, frozen_at=EXCLUDED.frozen_at
                 """,
-                (domain, reason, json.dumps(evidence, default=str), now),
+                (domain, reason, _jsonb(evidence), now),
             )
 
     def unfreeze_domain(self, domain: str) -> None:
@@ -279,12 +340,22 @@ class Seal:
         domain: str | None = None,
         read_set: Any = None,
         graph_id: str | None = None,
+        heal_with=None,
+        path: str | None = None,
     ) -> Admission:
         iid = intent_id(action, args, key)
         args_dig = _digest(args)
         fence = uuid.uuid4().hex
         now = time.time()
         lease = now + self.lease_sec
+
+        # CLEARANCE — the control plane, checked before anything else. A path
+        # that is not effectively CLEARED cannot fire unattended, no matter what
+        # the fence would allow. Only enforced when the caller names a path;
+        # callers that don't use clearance are unaffected.
+        if path is not None:
+            from .clearance import Clearance
+            Clearance(self).check(path)   # raises ClearanceDenied
 
         if domain is not None:
             frozen = self.domain_frozen(domain)
@@ -318,13 +389,15 @@ class Seal:
                 """,
                 (
                     iid, action, args_dig, fence, lease, domain,
-                    json.dumps(read_set, default=str) if read_set is not None else None,
+                    _jsonb(read_set) if read_set is not None else None,
                     graph_id, now, now,
                     domain,
                 ),
             ).fetchone()
 
             if row is not None:
+                if path is not None:
+                    self.record_event("admitted", path=path, intent=iid)
                 return Admission(fresh=True, intent=iid, fence=fence, cert=None)
 
             # Nothing inserted: either the intent already exists, or the domain
@@ -359,6 +432,24 @@ class Seal:
 
             if state == "sealed":
                 return Admission(fresh=False, intent=iid, fence="", cert=cert)
+            if state == "open" and lease_until < now and heal_with is not None:
+                # HEAL-ON-RECLAIM. The holder died mid-effect. Reclaiming and
+                # re-running is the LAST double-fire window in the system: if the
+                # dead holder already charged and crashed before sealing, the
+                # reclaimer charges again. So before handing out a fresh claim,
+                # ask the world whether the effect already exists. If it does,
+                # we seal it as a HEAL instead of re-executing — the effect
+                # happened once, we simply never recorded it.
+                #
+                # Only a definitive CONFIRMED_ONE heals. UNKNOWN (provider
+                # unreachable / not yet indexed) must NOT heal and must NOT
+                # re-execute blindly — it falls through to the normal reclaim,
+                # because guessing either way here is how money gets doubled.
+                from .witness import CONFIRMED_ONE
+                probe = heal_with.look({"intent": iid, "action": action})
+                if probe.state == CONFIRMED_ONE:
+                    healed = self._heal(iid, probe)
+                    return Admission(fresh=False, intent=iid, fence="", cert=healed)
             if state == "open" and lease_until < now:
                 # The holder crashed mid-effect. Reclaim atomically: only if the
                 # lease is still dead at write time (another reclaimer may beat us).
@@ -375,6 +466,54 @@ class Seal:
                     return Admission(fresh=True, intent=iid, fence=fence, cert=None)
             # Held and alive, or lost the reclaim race, or failed/fenced.
             return Admission(fresh=False, intent=iid, fence="", cert=cert)
+
+    # ── heal: the world already has the effect; record it instead of re-running ──
+    def _heal(self, intent: str, probe) -> dict:
+        """Seal an intent whose effect the world confirms already happened.
+
+        Used when a dead holder's claim is reclaimed but a world probe finds the
+        effect already exists. The alternative — re-executing — would be a real
+        double. A heal cert is marked so an auditor can see the effect was
+        recovered from the provider rather than sealed by its executor.
+        """
+        now = time.time()
+        with self._connect(autocommit=True) as c:
+            with c.transaction():
+                row = c.execute(
+                    "SELECT action, args_digest FROM seal_intents WHERE intent=%s FOR UPDATE",
+                    (intent,),
+                ).fetchone()
+                body = {
+                    "intent": intent,
+                    "action": row[0],
+                    "args_digest": row[1],
+                    "result_digest": _digest({"healed_from_world": probe.evidence}),
+                    "tier": TIER_WORLD_FINAL,
+                    "world": _TIER_TO_WORLD[TIER_WORLD_FINAL],
+                    "healed": True,
+                    "witness_state": probe.state,
+                    "witness_count": probe.count,
+                    "witness_evidence": probe.evidence,
+                    "at": now,
+                }
+                cert = self._append_cert(c, body)
+                c.execute(
+                    "UPDATE seal_intents SET state='sealed', cert=%s, tier=%s, updated_at=%s "
+                    "WHERE intent=%s",
+                    (_jsonb(cert), TIER_WORLD_FINAL, now, intent),
+                )
+        self.record_event("healed", intent=intent, detail={"count": probe.count})
+        return cert
+
+    # ── event log — the raw material for the Range Report ─────────────────
+    def record_event(self, kind: str, path: str | None = None,
+                     intent: str | None = None, detail: Any = None) -> None:
+        with self._connect(autocommit=True) as c:
+            c.execute(
+                "INSERT INTO seal_events (path, kind, intent, detail, at) VALUES (%s,%s,%s,%s,%s)",
+                (path, kind, intent, _jsonb(detail) if detail is not None else None,
+                 time.time()),
+            )
 
     # ── A3 · heartbeat: extend the lease while a long effect runs ─────────
     def heartbeat(self, intent: str, fence: str) -> float:
@@ -431,7 +570,7 @@ class Seal:
         c.execute(
             "INSERT INTO seal_certs (intent, hash, prev_hash, body, created_at) "
             "VALUES (%s,%s,%s,%s,%s)",
-            (body["intent"], cert_hash, prev_hash, json.dumps(cert, default=str),
+            (body["intent"], cert_hash, prev_hash, _jsonb(cert),
              body.get("at", time.time())),
         )
         return cert
@@ -474,7 +613,7 @@ class Seal:
                 c.execute(
                     "UPDATE seal_intents SET state='sealed', cert=%s, tier=%s, updated_at=%s "
                     "WHERE intent=%s",
-                    (json.dumps(cert, default=str), TIER_SEALED, now, intent),
+                    (_jsonb(cert), TIER_SEALED, now, intent),
                 )
                 return cert
 
