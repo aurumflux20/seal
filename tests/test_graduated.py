@@ -278,3 +278,35 @@ def test_underlying_clearance_hold_still_blocks_even_with_full_approval(gw: Gate
     from seal.clearance import ClearanceDenied
     with pytest.raises(ClearanceDenied):
         gw.propose("payout", {"amount": 5000}, key="pay-4", amount=5000)
+
+
+def test_refusing_an_agent_is_a_countable_event(gw: Gateway):
+    """A month in which the gateway stopped every large spend an agent tried
+    must not read as a quiet month. The refusal is recorded, with the amount."""
+    gw.propose("payout", {"amount": 5000}, key="pay-ev", amount=5000)
+    with gw.seal._connect(autocommit=True) as c:
+        row = c.execute(
+            "SELECT detail FROM seal_events WHERE kind='approval_required'"
+        ).fetchone()
+    assert row is not None, "an agent was refused and nothing was written down"
+    assert row[0]["amount"] == 5000
+    assert row[0]["tier"] == DUAL
+
+
+def test_range_report_states_approvals_in_money(gw: Gateway):
+    """The artifact a CFO reads answers 'how much', not 'how many events'."""
+    gc = GraduatedClearance(gw.seal, gov_key=b"fixed-test-governance-key")
+
+    ok = gw.propose("payout", {"amount": 5000}, key="pay-ok", amount=5000)
+    r1 = gc.request("payout", 5000, maker="alice", intent=ok["intent"])
+    gc.add_vote(r1["id"], "bob", APPROVE)
+    gc.add_vote(r1["id"], "carol", APPROVE)
+
+    no = gw.propose("payout", {"amount": 2500}, key="pay-no", amount=2500)
+    r2 = gc.request("payout", 2500, maker="alice", intent=no["intent"])
+    gc.add_vote(r2["id"], "bob", REJECT)
+
+    rep = Clearance(gw.seal).range_report()
+    assert rep["approvals"]["approved"] == {"count": 1, "amount": 5000.0}
+    assert rep["approvals"]["rejected"] == {"count": 1, "amount": 2500.0}
+    assert rep["events"]["approval_required"] == 2

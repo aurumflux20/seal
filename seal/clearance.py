@@ -209,6 +209,14 @@ class Clearance:
             frozen = c.execute(
                 "SELECT domain, reason, frozen_at FROM seal_domains WHERE frozen"
             ).fetchall()
+            # Approvals in money terms. A count of "2 approval_decided events"
+            # answers nothing a CFO asked; "$12,000 approved by two people,
+            # $8,000 stopped" does.
+            appr = c.execute(
+                "SELECT state, count(*), coalesce(sum(amount),0) "
+                "FROM seal_approvals WHERE created_at >= %s GROUP BY state",
+                (since,),
+            ).fetchall()
 
         report = {
             "period_start": since,
@@ -220,6 +228,9 @@ class Clearance:
                 for p, s, r, u in paths
             ],
             "cert_tiers": {t: n for t, n in tiers},
+            "approvals": {
+                s: {"count": n, "amount": float(a)} for s, n, a in appr
+            },
             "frozen_domains": [
                 {"domain": d, "reason": r, "at": a} for d, r, a in frozen
             ],

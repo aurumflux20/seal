@@ -187,6 +187,14 @@ class Gateway:
             if configured and tier != AUTO:
                 if approval_id is None:
                     self.seal.fail(adm.intent, adm.fence, "needs graduated approval")
+                    # An agent refused permission to spend is a countable
+                    # control event, not a silent branch. Without this the
+                    # Range Report shows "0 blocked" for a month in which the
+                    # gateway stopped every large spend an agent attempted.
+                    self.seal.record_event(
+                        "approval_required", path=path, intent=adm.intent,
+                        detail={"amount": amount, "tier": tier},
+                    )
                     return {"status": "needs_approval", "intent": adm.intent, "tier": tier}
                 appr = gc.get(approval_id)
                 mismatch = (appr["intent"] != adm.intent or appr["path"] != path
