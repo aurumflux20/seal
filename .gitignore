@@ -2,3 +2,4 @@
 __pycache__/
 *.egg-info/
 *.pyc
+# stripe_demo needs a key at runtime; never commit keys

@@ -284,3 +284,24 @@ def test_freeze_landing_mid_admission_still_blocks(seal: Seal):
         pass
     else:
         pytest.fail("frozen domain was not refused")
+
+
+def test_divergence_is_sticky_never_downgrades(seal: Seal):
+    """Once the world contradicts the ledger, a later witness that happens to
+    count 1 again must NOT downgrade the intent back to WORLD_FINAL. Provider
+    search indexes are eventually consistent — a re-poll flapping to 1 is noise,
+    not an all-clear. Learned from the live Stripe demo. The domain freeze was
+    already sticky; the cert tier now matches."""
+    a = seal.admit("charge", {"o": 1}, key="sticky-1", domain="customer:sticky")
+    seal.seal(a.intent, a.fence, {"ok": True})
+    # world says two → diverged + frozen
+    seal.witness(a.intent, _w(MULTIPLE, count=2))
+    assert seal.get(a.intent)["tier"] == TIER_WORLD_DIVERGED
+    # a later flaky re-poll counts one — must NOT un-diverge
+    seal.witness(a.intent, _w(CONFIRMED_ONE, count=1))
+    assert seal.get(a.intent)["tier"] == TIER_WORLD_DIVERGED
+    # the observation is still recorded as evidence (append-only)
+    certs = seal.certs_for(a.intent)
+    assert certs[-1]["observed_tier"] == TIER_WORLD_FINAL   # what THIS witness saw
+    assert certs[-1]["tier"] == TIER_WORLD_DIVERGED          # but tier stayed diverged
+    assert seal.domain_frozen("customer:sticky") is not None

@@ -544,7 +544,19 @@ class Seal:
             UNKNOWN: TIER_WORLD_UNKNOWN,
         }[result.state]
 
+        # DIVERGENCE IS STICKY. Once the world has contradicted the ledger, a
+        # later witness that happens to count 1 again must NOT silently downgrade
+        # the intent back to WORLD_FINAL — the contradiction is a permanent
+        # incident until a human reconciles it, and provider search indexes are
+        # eventually consistent, so a re-poll flapping to 1 is expected noise,
+        # not an all-clear. The new observation is still appended to the chain as
+        # evidence (append-only), but the intent's TIER never comes back up from
+        # DIVERGED. Caught by running the demo against live Stripe, where the
+        # rogue charge's search-index lag made a re-poll count 1 and un-diverge
+        # the cert. The domain freeze was already sticky; the tier now matches.
         now = time.time()
+        already_diverged = rec["tier"] == TIER_WORLD_DIVERGED
+        effective_tier = TIER_WORLD_DIVERGED if already_diverged else tier
         with self._connect(autocommit=True) as c:
             with c.transaction():
                 sealed = c.execute(
@@ -556,8 +568,9 @@ class Seal:
                     "intent": intent,
                     "action": sealed[1],
                     "args_digest": sealed[2],
-                    "tier": tier,
-                    "world": _TIER_TO_WORLD[tier],
+                    "tier": effective_tier,
+                    "world": _TIER_TO_WORLD[effective_tier],
+                    "observed_tier": tier,      # what THIS witness alone saw
                     "witness_state": result.state,
                     "witness_count": result.count,
                     "witness_evidence": result.evidence,
@@ -567,9 +580,12 @@ class Seal:
                 cert = self._append_cert(c, body)
                 c.execute(
                     "UPDATE seal_intents SET tier=%s, updated_at=%s WHERE intent=%s",
-                    (tier, now, intent),
+                    (effective_tier, now, intent),
                 )
 
+        # Freeze whenever THIS observation is a divergence — even if the tier was
+        # already diverged, re-freezing is harmless (idempotent) and keeps the
+        # freeze reason current.
         if tier == TIER_WORLD_DIVERGED and freeze_on_diverge and rec["domain"]:
             self.freeze_domain(
                 rec["domain"],
