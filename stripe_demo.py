@@ -10,11 +10,18 @@ on its own), the witness runs again, Stripe now answers TWO, the cert becomes
 WORLD_DIVERGED, and the domain freezes.
 
 Everything here is measured against a live Stripe test account. livemode=False,
-no real money. Run:  SEAL_DSN=... python stripe_demo.py
+no real money moves. Uses only Stripe's own test card (pm_card_visa) and your
+own test-mode secret key — nothing here talks to anyone but you and Stripe.
+
+Run:
+    export SEAL_DSN="host=... dbname=..."
+    export STRIPE_TEST_KEY="sk_test_..."   # Dashboard -> Developers -> API keys
+    python stripe_demo.py
 """
 from __future__ import annotations
 
 import os
+import sys
 import threading
 import time
 import urllib.parse
@@ -24,19 +31,26 @@ from seal import Seal
 from seal.core import TIER_WORLD_FINAL, TIER_WORLD_DIVERGED
 from seal.witness import StripeWitness, CONFIRMED_ONE
 
-DSN = os.environ["SEAL_DSN"]
-KEY = os.environ.get("STRIPE_TEST_KEY") or _read_key()  # noqa: F821 (defined below)
+DSN = os.environ.get("SEAL_DSN")
+KEY = os.environ.get("STRIPE_TEST_KEY")
 
+if not DSN:
+    sys.exit("SEAL_DSN not set. export SEAL_DSN=\"host=... dbname=...\"")
+if not KEY:
+    sys.exit(
+        "STRIPE_TEST_KEY not set.\n"
+        "Get a test-mode secret key (starts sk_test_) from your own Stripe "
+        "Dashboard -> Developers -> API keys, then:\n"
+        '  export STRIPE_TEST_KEY="sk_test_..."\n'
+        "This demo only ever moves fake test-mode money on YOUR account."
+    )
+if not KEY.startswith(("sk_test_", "rk_test_")):
+    sys.exit(
+        f"STRIPE_TEST_KEY does not look like a test-mode key "
+        f"(expected it to start with sk_test_ or rk_test_). Refusing to run "
+        f"against what might be a live key — this demo creates real charges."
+    )
 
-def _read_key() -> str:
-    with open(os.path.expanduser("~/.seal-stripe-key")) as f:
-        for line in f:
-            if line.startswith("STRIPE_TEST_KEY="):
-                return line.split("=", 1)[1].strip()
-    raise SystemExit("no STRIPE_TEST_KEY")
-
-
-KEY = os.environ.get("STRIPE_TEST_KEY") or _read_key()
 API = "https://api.stripe.com"
 
 
