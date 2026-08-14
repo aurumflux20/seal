@@ -170,9 +170,14 @@ class Gateway:
             raise NoSuchExecutor(f"no executor registered for path {path!r}")
 
         # admit() itself enforces clearance, the domain freeze, and — when the
-        # caller opts in — the pre-commit world freeze (B1).
+        # caller opts in — the pre-commit world freeze (B1). `_mandate_exempt`
+        # is safe here specifically because THIS call site mints the Mandate
+        # a few lines below, the moment admission succeeds — it is not a
+        # generic escape hatch, it is "the gateway is about to satisfy the
+        # requirement it is currently checking."
         adm = self.seal.admit(path, args, key=key, domain=domain, path=path,
-                              read_set=read_set, checker=checker)
+                              read_set=read_set, checker=checker,
+                              _mandate_exempt=True)
 
         if not adm.fresh:
             if adm.cert is not None:
@@ -186,7 +191,7 @@ class Gateway:
         # than leaving a claimed-but-unusable intent sitting open.
         if amount is not None:
             from .graduated import (
-                AUTO, APPROVED, GraduatedClearance, GraduatedError,
+                APPROVE, AUTO, APPROVED, GraduatedClearance, GraduatedError,
                 ApprovalConsumed, ApprovalNotSatisfied,
             )
             gc = GraduatedClearance(self.seal)
@@ -250,7 +255,27 @@ class Gateway:
                    self._sign(adm.intent, path, adm.fence, args_dig, exp))
         self._pending = getattr(self, "_pending", {})
         self._pending[t.sig] = reservation
-        return {"status": "cleared", "intent": adm.intent, "ticket": t.to_dict()}
+
+        # MANDATE — minted here, the one moment everything above has already
+        # been true: clearance checked, graduated approval satisfied (or not
+        # required), a ticket about to be issued. This is durable evidence of
+        # WHY execution is about to be permitted, written at permission time
+        # rather than reconstructed afterward from scattered event rows.
+        from .clearance import Clearance
+        from .mandate import Mandates
+        mandate = Mandates(self.seal).mint(
+            intent=adm.intent, path=path, args_digest=args_dig, amount=amount,
+            tier=(tier if amount is not None and configured else None),
+            approval_id=approval_id,
+            approvers=([v["approver"] for v in appr["votes"] if v["decision"] == APPROVE]
+                      if amount is not None and configured and tier != AUTO else None),
+            clearance=Clearance(self.seal).status(path)["effective"],
+        )
+        self._pending_mandate = getattr(self, "_pending_mandate", {})
+        self._pending_mandate[t.sig] = mandate["mandate_id"]
+
+        return {"status": "cleared", "intent": adm.intent, "ticket": t.to_dict(),
+                "mandate_id": mandate["mandate_id"]}
 
     def execute(self, ticket: dict | Ticket, args: Any) -> dict:
         """Spend a ticket. The gateway — not the agent — calls the provider."""
@@ -287,6 +312,18 @@ class Gateway:
 
         pending = getattr(self, "_pending", {})
         reservation = pending.pop(t.sig, None)
+
+        # Spend the Mandate in the same breath as the ticket. Consuming it
+        # here — after the ticket claim succeeds, before the provider is
+        # called — means a Mandate is never left dangling as "active" once
+        # its execution has actually happened, and a replay of this ticket
+        # (already refused above by TicketAlreadySpent) can never reach a
+        # second mandate.consume() either.
+        pending_mandate = getattr(self, "_pending_mandate", {})
+        mandate_id = pending_mandate.pop(t.sig, None)
+        if mandate_id is not None:
+            from .mandate import Mandates
+            Mandates(self.seal).consume(mandate_id, intent=t.intent, args_digest=t.args_digest)
 
         try:
             result = fn(args)                      # the ONLY place the secret is used

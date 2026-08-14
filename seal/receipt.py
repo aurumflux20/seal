@@ -134,6 +134,17 @@ class Receipt:
         world = self._world_block(latest)
         off_rail = self._off_rail_block(rec, reconcile_window_sec)
 
+        from .mandate import Mandates
+        mandate = Mandates(self.seal).for_intent(intent)
+        allowed["mandate_id"] = mandate["mandate_id"] if mandate else None
+        allowed["on_rail"] = mandate is not None
+        allowed["note"] = (
+            (allowed.get("note") or "") +
+            ("" if mandate else
+             " No Mandate is on record for this intent — either the path was "
+             "not under Mandate, or it was admitted outside the Gateway.")
+        ).strip()
+
         status, label = self._status(rec, once, world, off_rail)
 
         # Amount is only known when the path went through graduated approval —
@@ -462,6 +473,8 @@ def render_html(receipt: dict) -> str:
     {_row("Action", act.get("path"))}
     {_row("Amount", act.get("amount"))}
     {_row("Domain", act.get("domain"))}
+    {_row("On-rail (under a Seal Mandate)", a.get("on_rail"))}
+    {_row("Mandate id", a.get("mandate_id"))}
     {_row("Authorisation tier", a.get("tier"))}
     {_row("Requested by", a.get("requested_by"))}
     {_row("Requested at", a.get("requested_at"))}

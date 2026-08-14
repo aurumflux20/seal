@@ -285,6 +285,36 @@ CREATE TABLE IF NOT EXISTS seal_tickets (
     path     TEXT NOT NULL,
     spent_at DOUBLE PRECISION NOT NULL
 );
+
+-- Which paths are under Mandate. An operator-only table: no agent-facing tool
+-- writes to it, for the same reason there is no seal_unfreeze tool — a gate
+-- that could release itself is not a gate.
+CREATE TABLE IF NOT EXISTS seal_mandate_paths (
+    path       TEXT PRIMARY KEY,
+    required   BOOLEAN NOT NULL,
+    updated_at DOUBLE PRECISION NOT NULL,
+    updated_by TEXT NOT NULL
+);
+
+-- One row per Mandate: durable evidence of WHY an execution was permitted,
+-- written at the moment it was permitted. `consumed_at` is claimed via
+-- `UPDATE ... WHERE consumed_at IS NULL`, the same single-writer-wins idiom
+-- as seal_tickets, so two processes racing the same Mandate cannot both spend it.
+CREATE TABLE IF NOT EXISTS seal_mandates (
+    mandate_id   TEXT PRIMARY KEY,
+    intent       TEXT NOT NULL,
+    path         TEXT NOT NULL,
+    args_digest  TEXT NOT NULL,
+    amount       DOUBLE PRECISION,
+    tier         TEXT,
+    approval_id  TEXT,
+    approvers    JSONB,
+    clearance    TEXT,
+    created_at   DOUBLE PRECISION NOT NULL,
+    expires_at   DOUBLE PRECISION NOT NULL,
+    consumed_at  DOUBLE PRECISION
+);
+CREATE INDEX IF NOT EXISTS seal_mandates_intent ON seal_mandates (intent);
 """
 
 # Idempotent migrations for stores created by an earlier version.
@@ -306,6 +336,27 @@ CREATE TABLE IF NOT EXISTS seal_tickets (
     path     TEXT NOT NULL,
     spent_at DOUBLE PRECISION NOT NULL
 );
+CREATE TABLE IF NOT EXISTS seal_mandate_paths (
+    path       TEXT PRIMARY KEY,
+    required   BOOLEAN NOT NULL,
+    updated_at DOUBLE PRECISION NOT NULL,
+    updated_by TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS seal_mandates (
+    mandate_id   TEXT PRIMARY KEY,
+    intent       TEXT NOT NULL,
+    path         TEXT NOT NULL,
+    args_digest  TEXT NOT NULL,
+    amount       DOUBLE PRECISION,
+    tier         TEXT,
+    approval_id  TEXT,
+    approvers    JSONB,
+    clearance    TEXT,
+    created_at   DOUBLE PRECISION NOT NULL,
+    expires_at   DOUBLE PRECISION NOT NULL,
+    consumed_at  DOUBLE PRECISION
+);
+CREATE INDEX IF NOT EXISTS seal_mandates_intent ON seal_mandates (intent);
 """
 
 
@@ -409,6 +460,7 @@ class Seal:
         heal_with=None,
         path: str | None = None,
         checker=None,
+        _mandate_exempt: bool = False,
     ) -> Admission:
         iid = intent_id(action, args, key)
         args_dig = _digest(args)
@@ -423,6 +475,32 @@ class Seal:
         if path is not None:
             from .clearance import Clearance
             Clearance(self).check(path)   # raises ClearanceDenied
+
+            # MANDATE GATE. A path an operator has put `require_mandate` on
+            # cannot be admitted by a bare admit() call at all — only through
+            # Gateway.propose(), which mints the Mandate right after this
+            # check passes. This is what makes "cannot execute without a
+            # Mandate" a real refusal rather than a naming exercise: an agent
+            # that fetched a raw admit() path and skipped the gateway is
+            # stopped HERE, before a fence is ever granted, not detected after
+            # the fact by reconcile.py (which remains the backstop for a
+            # caller that bypasses Seal entirely, holding its own credential —
+            # no in-process gate can reach that case; only the CFO-facing
+            # sweep can).
+            #
+            # `_mandate_exempt` exists ONLY for Gateway.propose()'s own call
+            # into admit() — the Gateway is the trusted path that is ABOUT TO
+            # mint the Mandate this same check would otherwise demand already
+            # exist, a chicken-and-egg the flag breaks. It is not part of the
+            # MCP surface: `seal_admit` never sets it, so the direct/bypass
+            # path stays blocked exactly as before.
+            if not _mandate_exempt:
+                from .mandate import Mandates, MandateRequired
+                if Mandates(self).is_required(path):
+                    raise MandateRequired(
+                        f"path {path!r} requires a Seal Mandate — call "
+                        "Gateway.propose()/execute(), not admit() directly"
+                    )
 
         # PRE-COMMIT WORLD FREEZE (B1). Enforced HERE, before any fence is
         # granted — not at seal(), after the caller has already run the

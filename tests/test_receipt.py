@@ -304,3 +304,31 @@ def test_checked_at_absent_until_a_witness_actually_ran(seal):
     seal.seal(adm.intent, adm.fence, {"ok": True})
     r = Receipt(seal).build(adm.intent)
     assert r["world_id"]["checked_at"] is None
+
+
+# ── Mandate integration ──────────────────────────────────────────────────
+def test_receipt_shows_on_rail_when_a_mandate_covers_this_intent(seal):
+    from seal.authority import Gateway
+    from seal.mandate import Mandates
+    Clearance(seal).set_policy("charge", CLEARED)
+    Clearance(seal).record_proof("charge", green=True)
+    gw = Gateway(seal, ticket_key=b"k")
+    gw.register_executor("charge", lambda a: {"paid": a["amount"]})
+
+    prop = gw.propose("charge", {"amount": 50}, key="rcpt-mand-1", amount=50)
+    gw.execute(prop["ticket"], {"amount": 50})
+
+    r = Receipt(seal).build(prop["intent"])
+    assert r["allowed"]["on_rail"] is True
+    assert r["allowed"]["mandate_id"] == prop["mandate_id"]
+
+
+def test_receipt_shows_off_rail_when_no_mandate_exists(seal):
+    """An intent admitted with bare admit() (no path under Mandate) still gets
+    a receipt — it just honestly reports it was not on-rail."""
+    adm = seal.admit("charge", {"amount": 10}, key="rcpt-nomand-1")
+    seal.seal(adm.intent, adm.fence, {"ok": True})
+    r = Receipt(seal).build(adm.intent)
+    assert r["allowed"]["on_rail"] is False
+    assert r["allowed"]["mandate_id"] is None
+    assert "No Mandate is on record" in r["allowed"]["note"]
