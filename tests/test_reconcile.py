@@ -120,3 +120,31 @@ def test_out_of_band_is_recorded_as_an_event(seal):
         ).fetchone()
     assert row is not None, "a breach that is not recorded cannot reach a report"
     assert row[0]["count"] == 1
+
+
+def test_breach_reaches_the_report_a_buyer_reads(seal):
+    """A breach recorded but absent from the Range Report is a breach nobody reads."""
+    from seal.clearance import Clearance
+    lister = CallableLister(lambda a, b: [
+        ProviderEffect(id="pi_r1", amount=2500, intent_tag=None),
+        ProviderEffect(id="pi_r2", amount=1500, intent_tag=None),
+    ])
+    Reconciler(seal).sweep(lister, since=time.time() - 60)
+
+    rep = Clearance(seal).range_report()
+    oob = rep["out_of_band_spend"]
+    assert oob["incidents"] == 1
+    assert oob["effects"] == 2
+    assert oob["amount"] == 4000
+
+
+def test_unreadable_sweep_shows_in_the_report_too(seal):
+    """A month of failed reconciliation must not look identical to a clean one."""
+    from seal.clearance import Clearance
+    def boom(a, b):
+        raise RuntimeError("provider down")
+    Reconciler(seal).sweep(CallableLister(boom), since=time.time() - 60)
+
+    rep = Clearance(seal).range_report()
+    assert rep["out_of_band_spend"]["unreadable_sweeps"] == 1
+    assert rep["out_of_band_spend"]["incidents"] == 0

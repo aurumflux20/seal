@@ -217,6 +217,19 @@ class Clearance:
                 "FROM seal_approvals WHERE created_at >= %s GROUP BY state",
                 (since,),
             ).fetchall()
+            # Spend that never came through the gateway, and sweeps that could
+            # not answer. A breach recorded but absent from the report is a
+            # breach nobody reads — and an UNKNOWN sweep must appear too, or a
+            # month of failed reconciliation looks identical to a clean one.
+            oob = c.execute(
+                "SELECT detail FROM seal_events "
+                "WHERE kind='out_of_band_spend' AND at >= %s ORDER BY at DESC",
+                (since,),
+            ).fetchall()
+            unk = c.execute(
+                "SELECT count(*) FROM seal_events WHERE kind='reconcile_unknown' AND at >= %s",
+                (since,),
+            ).fetchone()
 
         report = {
             "period_start": since,
@@ -230,6 +243,19 @@ class Clearance:
             "cert_tiers": {t: n for t, n in tiers},
             "approvals": {
                 s: {"count": n, "amount": float(a)} for s, n, a in appr
+            },
+            "out_of_band_spend": {
+                "incidents": len(oob),
+                "effects": sum((d[0] or {}).get("count", 0) for d in oob),
+                "amount": sum((d[0] or {}).get("amount", 0) or 0 for d in oob),
+                "unreadable_sweeps": (unk[0] if unk else 0),
+                "note": (
+                    "Effects the provider performed that this gateway never "
+                    "admitted — i.e. something moved money outside the rail. "
+                    "`unreadable_sweeps` counts reconciliations that could NOT "
+                    "reach an answer; those are not clean months, they are "
+                    "unmeasured ones."
+                ),
             },
             "frozen_domains": [
                 {"domain": d, "reason": r, "at": a} for d, r, a in frozen
