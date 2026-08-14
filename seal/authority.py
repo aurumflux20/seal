@@ -57,6 +57,16 @@ class InvalidTicket(AuthorityError):
     """The ticket is forged, expired, already spent, or for another intent."""
 
 
+class TicketAlreadySpent(InvalidTicket):
+    """This exact ticket has already been executed — proven from the STORE.
+
+    Subclasses InvalidTicket so existing callers that catch InvalidTicket keep
+    working. It is separate because it means something stronger and more
+    useful: not "this ticket looks wrong" but "another process already called
+    the provider with it, and we refused to do it again."
+    """
+
+
 @dataclass(frozen=True)
 class Ticket:
     """What an agent gets instead of a credential.
@@ -241,6 +251,31 @@ class Gateway:
         fn = self._executors.get(t.path)
         if fn is None:
             raise NoSuchExecutor(f"no executor registered for path {t.path!r}")
+
+        # DURABLE single-use claim, BEFORE the provider is touched.
+        #
+        # `self._spent` is process memory. A restarted gateway, or a second
+        # replica sharing SEAL_TICKET_KEY (which replicas MUST share to work at
+        # all), has an empty set — it re-verified a spent ticket, called the
+        # provider a second time, and only then failed to seal. The agent saw
+        # "NotFenceHolder" and read it as "it didn't work", while the money had
+        # moved twice and the chain recorded once.
+        #
+        # That is check-then-act across processes: the exact defect this
+        # library exists to prevent, inside this library. The guard has to live
+        # where both processes can see it, and it has to be one atomic step.
+        with self.seal._connect(autocommit=True) as c:
+            claimed = c.execute(
+                "INSERT INTO seal_tickets (sig, intent, path, spent_at) "
+                "VALUES (%s,%s,%s,%s) ON CONFLICT (sig) DO NOTHING",
+                (t.sig, t.intent, t.path, time.time()),
+            ).rowcount
+        if not claimed:
+            self._spent.add(t.sig)   # keep local memory consistent with the store
+            raise TicketAlreadySpent(
+                f"ticket for intent {t.intent} was already spent — refusing to "
+                "call the provider a second time"
+            )
 
         pending = getattr(self, "_pending", {})
         reservation = pending.pop(t.sig, None)

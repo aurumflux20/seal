@@ -262,6 +262,23 @@ CREATE TABLE IF NOT EXISTS seal_events (
     at      DOUBLE PRECISION NOT NULL
 );
 CREATE INDEX IF NOT EXISTS seal_events_at ON seal_events (at DESC);
+
+-- Single-use gateway tickets, claimed DURABLY before the provider is called.
+--
+-- The gateway used to guard replay with an in-process set. Two server
+-- processes share no memory, so a restarted or replicated gateway would
+-- re-verify a spent ticket, call the provider a SECOND time, and only then
+-- fail to seal — money moved twice, chain records once. Found by driving the
+-- MCP server as two separate processes; a single-process test cannot see it.
+--
+-- One row per ticket signature, INSERT ... ON CONFLICT DO NOTHING: one winner,
+-- decided in the store, with no window between the check and the write.
+CREATE TABLE IF NOT EXISTS seal_tickets (
+    sig      TEXT PRIMARY KEY,
+    intent   TEXT NOT NULL,
+    path     TEXT NOT NULL,
+    spent_at DOUBLE PRECISION NOT NULL
+);
 """
 
 # Idempotent migrations for stores created by an earlier version.
@@ -277,6 +294,12 @@ ALTER TABLE seal_intents ADD COLUMN IF NOT EXISTS domain   TEXT;
 ALTER TABLE seal_intents ADD COLUMN IF NOT EXISTS read_set JSONB;
 ALTER TABLE seal_intents ADD COLUMN IF NOT EXISTS tier     TEXT;
 ALTER TABLE seal_intents ADD COLUMN IF NOT EXISTS graph_id TEXT;
+CREATE TABLE IF NOT EXISTS seal_tickets (
+    sig      TEXT PRIMARY KEY,
+    intent   TEXT NOT NULL,
+    path     TEXT NOT NULL,
+    spent_at DOUBLE PRECISION NOT NULL
+);
 """
 
 
