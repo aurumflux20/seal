@@ -150,21 +150,29 @@ class Gateway:
     # ── the agent-facing surface ──────────────────────────────────────────
     def propose(self, path: str, args: Any, key: str | None = None,
                 domain: str | None = None, budget_key: str | None = None,
-                amount: float | None = None, approval_id: str | None = None) -> dict:
+                amount: float | None = None, approval_id: str | None = None,
+                read_set: Any = None, checker=None) -> dict:
         """An agent asks to act. It gets a ticket, a replayed result, a no, or
         (for amounts above the auto-clear ceiling) a request to go get a
         satisfied maker-checker approval first.
 
-        Order is deliberate: clearance (may this path run at all?) → admission
-        (is this intent already taken?) → graduated approval (does this AMOUNT
-        need a second human?) → budget (is there headroom?). The cheapest and
-        most absolute refusals come first.
+        Order is deliberate: clearance (may this path run at all?) → world
+        freshness (has the read_set gone stale?) → admission (is this intent
+        already taken?) → graduated approval (does this AMOUNT need a second
+        human?) → budget (is there headroom?). The cheapest and most absolute
+        refusals come first.
+
+        `read_set`/`checker` are optional and pass straight through to
+        admit() — see freshness.py. Without both, this path is unaffected,
+        exactly like graduated clearance and budget.
         """
         if path not in self._executors:
             raise NoSuchExecutor(f"no executor registered for path {path!r}")
 
-        # admit() itself enforces clearance and the domain freeze
-        adm = self.seal.admit(path, args, key=key, domain=domain, path=path)
+        # admit() itself enforces clearance, the domain freeze, and — when the
+        # caller opts in — the pre-commit world freeze (B1).
+        adm = self.seal.admit(path, args, key=key, domain=domain, path=path,
+                              read_set=read_set, checker=checker)
 
         if not adm.fresh:
             if adm.cert is not None:

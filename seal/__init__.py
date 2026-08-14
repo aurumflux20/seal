@@ -12,11 +12,13 @@ from .core import (
     PayloadConflict,
     Seal,
     SealError,
+    StaleWorldRead,
     intent_id,
 )
 
 __all__ = [
     "Seal", "Admission", "intent_id",
     "SealError", "PayloadConflict", "DomainFrozen", "NotFenceHolder",
+    "StaleWorldRead",
 ]
 __version__ = "0.2.0"

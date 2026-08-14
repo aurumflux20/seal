@@ -124,6 +124,12 @@ class DomainFrozen(SealError):
     """The domain is frozen by the divergence circuit breaker; nothing is admitted."""
 
 
+class StaleWorldRead(SealError):
+    """The caller's own freshness check says the world moved since read_set was
+    captured. Refused before the fence is granted — nothing was admitted, so
+    nothing was acted on, on information that was already stale."""
+
+
 def intent_id(action: str, args: Any, key: str | None = None) -> str:
     """Stable id for a logical action.
 
@@ -402,6 +408,7 @@ class Seal:
         graph_id: str | None = None,
         heal_with=None,
         path: str | None = None,
+        checker=None,
     ) -> Admission:
         iid = intent_id(action, args, key)
         args_dig = _digest(args)
@@ -416,6 +423,33 @@ class Seal:
         if path is not None:
             from .clearance import Clearance
             Clearance(self).check(path)   # raises ClearanceDenied
+
+        # PRE-COMMIT WORLD FREEZE (B1). Enforced HERE, before any fence is
+        # granted — not at seal(), after the caller has already run the
+        # effect. Checking after the fact could only refuse to claim success;
+        # it cannot stop money moving on information that was already stale.
+        # Opt-in and backward-compatible by the same rule as graduated
+        # clearance: only engages when the caller supplies BOTH a read_set
+        # and a checker. A read_set with no checker is still accepted and
+        # stored on the cert — Seal cannot invent a freshness check for facts
+        # it does not understand — but it is now honestly inert rather than
+        # silently believed to be enforced.
+        if read_set is not None and checker is not None:
+            if not checker.fresh(read_set):
+                raise StaleWorldRead(
+                    "read_set is stale — the world moved since these facts "
+                    "were captured; refusing to admit before anything ran"
+                )
+            # HONEST LIMIT: checker.fresh() calls out to the caller's world —
+            # it cannot be embedded in the INSERT's WHERE clause the way the
+            # domain-freeze re-check below can, because Postgres cannot ask an
+            # external system a question inside one statement. A change
+            # landing in the gap between this line and the INSERT is a
+            # narrower residual window, not a closed one. This freeze is
+            # exactly as strong as the caller's checker and the freshness of
+            # its own read, same caveat class as a witness's eventually-
+            # consistent provider index — printed here rather than left to be
+            # discovered.
 
         if domain is not None:
             frozen = self.domain_frozen(domain)

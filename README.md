@@ -108,6 +108,36 @@ appear — the witness polls to a definitive answer rather than ever recording a
 contradicted the ledger, a later flaky re-count must never quietly downgrade
 the cert back to `WORLD_FINAL` — divergence is sticky by design.
 
+## Pre-commit world freeze — don't act on facts that already moved
+
+`admit()` has always taken a `read_set` — the world facts a decision depends
+on (a cart total, an inventory count) — and stored it on the cert. Until now
+nothing ever checked it: a caller who believed they had staleness protection
+had none. Same defect shape as a bug fixed earlier the same day, one layer up
+— a guard present in the schema, never enforced.
+
+```python
+from seal.freshness import CallableChecker
+
+fresh = CallableChecker(lambda rs: current_cart_total(rs["order_id"]) == rs["total"])
+
+adm = seal.admit("charge", {"amount": 5000}, key="order-777",
+                 read_set={"order_id": "777", "total": 5000}, checker=fresh)
+# StaleWorldRead is raised BEFORE a fence is granted if the checker says no —
+# nothing runs on facts that already changed. Gateway.propose() takes the
+# same read_set/checker kwargs and passes them straight through.
+```
+
+Enforcement point is deliberate: before the fence, not after the effect ran.
+Checking afterward could only refuse to *claim* success — it can't stop money
+moving on stale information, which is the actual failure this exists to
+prevent. Opt-in and backward-compatible, same rule as everywhere else in this
+library: only engages when the caller supplies both `read_set` and `checker`.
+Honest limit, printed where it applies rather than left to be discovered: the
+checker call itself can't be made atomic with the admission INSERT, so a
+change landing in that narrow gap is a residual window — the same caveat
+class as a witness's eventually-consistent provider index.
+
 ## Clearance — permission that has to be earned, not declared
 
 The fence proves an action ran once. Clearance is the layer above it that a

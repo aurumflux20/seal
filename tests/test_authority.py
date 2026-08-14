@@ -240,3 +240,26 @@ def test_budget_exceeded_refuses_the_ticket_not_just_the_charge(gw: Gateway):
                    budget_key="cust:10", amount=999)
     # the intent must not be left dangling half-admitted after the refusal
     assert Budget(gw.seal).remaining("cust:10") == 50
+
+
+# ── B1: pre-commit world freeze, wired through the Gateway ────────────────
+# propose() previously dropped read_set/checker on the floor — admit() had the
+# enforcement, but the productized path nobody actually uses admit() through
+# had no way to opt in. Buyers use Gateway.propose(), not raw admit().
+
+def test_propose_refuses_before_the_provider_is_ever_called_on_stale_facts(gw: Gateway):
+    from seal.freshness import CallableChecker
+    calls = []
+    gw.register_executor("charge", lambda a: calls.append(a) or {"ok": True})
+    with pytest.raises(Exception):
+        gw.propose("charge", {"amount": 50}, key="stale-1",
+                  read_set={"cart_total": 50}, checker=CallableChecker(lambda rs: False))
+    assert calls == []   # never reached the executor — refused before any ticket existed
+
+
+def test_propose_with_fresh_read_set_clears_normally(gw: Gateway):
+    from seal.freshness import CallableChecker
+    prop = gw.propose("charge", {"amount": 50}, key="stale-2",
+                      read_set={"cart_total": 50},
+                      checker=CallableChecker(lambda rs: rs["cart_total"] == 50))
+    assert prop["status"] == "cleared"
