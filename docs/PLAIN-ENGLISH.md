@@ -114,21 +114,27 @@ Everything above is public code. You do not need a call, a demo, or an NDA.
 
 ```bash
 git clone https://github.com/aurumflux20/seal && cd seal
-pip install -e .
+
+# Needs Python 3.10 or newer. A Mac ships an older one, so make a clean
+# workspace first — this works on any machine and changes nothing outside it.
+python3 -m venv .venv && source .venv/bin/activate
+python3 -m pip install -U pip
+python3 -m pip install -e .
+
 export SEAL_DSN="host=... dbname=seal"
 
-python storm.py --n 1000       # 1,000 agents rush the same payment at once.
+python3 storm.py --n 1000       # 1,000 agents rush the same payment at once.
                                # Exactly one gets through. Count it yourself.
 
-python approval_demo.py        # Watch the approval rules. Small purchase goes
+python3 approval_demo.py        # Watch the approval rules. Small purchase goes
                                # through. $12,000 waits for two people. The
                                # person who asked is refused when they try to
                                # approve it themselves.
 
-python -m seal verify          # Check the log has not been tampered with.
+python3 -m seal verify          # Check the log has not been tampered with.
 ```
 
-There are 115 tests, and the mean ones are in there: fake permission slips,
+There are 133 tests, and the mean ones are in there: fake permission slips,
 reused permission slips, someone changing the amount after approval, someone
 approving their own request, two people racing to be the second approver at the
 same millisecond.

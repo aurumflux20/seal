@@ -21,7 +21,7 @@ deleting or reordering any cert breaks every hash after it — and anyone with t
 DSN can check, with no network and no trust in us:
 
 ```bash
-SEAL_DSN="..." python -m seal verify
+SEAL_DSN="..." python3 -m seal verify
 # chain VERIFIED — 41 cert(s), every link intact   (exit 0; broken chain → exit 1)
 ```
 
@@ -39,8 +39,17 @@ numbers, including the honest limits: [STORM-PROOF.md](STORM-PROOF.md).
 Run it yourself:
 
 ```bash
-pip install -e . && export SEAL_DSN="host=... dbname=seal"
-python storm.py --n 1000
+# Needs Python 3.10+ and a modern pip. macOS ships 3.9 with pip 21, which fails
+# on an editable install from pyproject.toml with a misleading "setup.py not
+# found" error — so create a venv rather than debugging that.
+python3 --version                      # want 3.10 or newer
+# older? macOS:  brew install python@3.12   (or use pyenv / uv)
+python3 -m venv .venv && source .venv/bin/activate
+python3 -m pip install -U pip
+python3 -m pip install -e .
+
+export SEAL_DSN="host=... dbname=seal"
+python3 storm.py --n 1000
 ```
 
 ## Test YOUR server, not just ours
@@ -50,7 +59,7 @@ dependency on this repo — copy it, point it at your own write-bearing tool,
 and find out for yourself:
 
 ```bash
-python range_safety_test.py --n 1000
+python3 range_safety_test.py --n 1000
 ```
 
 It demonstrates itself against a known-unsafe target and a known-safe one
@@ -87,7 +96,7 @@ is allowed to disagree with us.
 ```bash
 export SEAL_DSN="host=... dbname=..."
 export STRIPE_TEST_KEY="sk_test_..."   # your own test-mode key, Dashboard -> API keys
-python stripe_demo.py
+python3 stripe_demo.py
 ```
 
 What it does, against your real Stripe test account, no mocks:
@@ -234,7 +243,7 @@ existing budget-only integrations are unaffected.
 Run the whole story end to end — no payment provider needed, nothing charged:
 
 ```bash
-python approval_demo.py
+python3 approval_demo.py
 ```
 
 A $200 purchase clears on its own; $12,000 is refused until two *distinct*

@@ -119,10 +119,10 @@ work; none surfaced from a passing suite:**
 
 **Reproduce:**
 ```bash
-pip install -e . && export SEAL_DSN="host=... dbname=seal"
-python -m pytest tests/ -q      # 13 attack tests
-python storm.py --n 1000        # exit 0 == exactly-once held
-python -m seal verify           # audit the cert chain, DSN only
+python3 -m pip install -e . && export SEAL_DSN="host=... dbname=seal"
+python3 -m pytest tests/ -q      # 13 attack tests
+python3 storm.py --n 1000        # exit 0 == exactly-once held
+python3 -m seal verify           # audit the cert chain, DSN only
 ```
 
 **Files:** `seal/core.py` (kernel), `seal/cli.py` (`seal verify`), `storm.py`
