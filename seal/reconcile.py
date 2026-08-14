@@ -194,7 +194,7 @@ class Reconciler:
             self.seal.record_event(
                 "out_of_band_spend",
                 detail={"count": len(rogue), "amount": report["out_of_band_amount"],
-                        "ids": report["out_of_band_ids"]},
+                        "ids": report["out_of_band_ids"], "domain": freeze_domain},
             )
             if freeze_domain:
                 self.seal.freeze_domain(

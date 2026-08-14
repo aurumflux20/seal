@@ -727,7 +727,7 @@ class Seal:
     def get(self, intent: str) -> Optional[dict]:
         with self._connect(autocommit=True) as c:
             row = c.execute(
-                "SELECT intent, action, state, tier, cert, domain, graph_id "
+                "SELECT intent, action, state, tier, cert, domain, graph_id, created_at "
                 "FROM seal_intents WHERE intent=%s",
                 (intent,),
             ).fetchone()
@@ -736,6 +736,7 @@ class Seal:
         return {
             "intent": row[0], "action": row[1], "state": row[2],
             "tier": row[3], "cert": row[4], "domain": row[5], "graph_id": row[6],
+            "created_at": row[7],
         }
 
     def certs_for(self, intent: str) -> list[dict]:
