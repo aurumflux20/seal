@@ -74,11 +74,10 @@ class Receipt:
             ),
             "receipt_id": "sample_9f2a1c",
             "title": "Agent Authorization Receipt",
-            "summary": "Stripe · $4,900.00 refund to customer #8841 · ran once · provider confirms",
+            "summary": "refund · $4,900.00 · cus_8841 · allowed, ran once, confirmed by the provider",
             "status": ALLOWED_ONCE,
             "status_label": "Allowed, ran once, confirmed by the provider",
-            "action": {"path": "refund", "amount": 4900.00, "currency": "USD",
-                      "target": "cus_8841 (Stripe)"},
+            "action": {"path": "refund", "domain": "cus_8841", "amount": 4900.00},
             "allowed": {
                 "tier": "DUAL",
                 "requested_by": "agent:refunds-bot",
@@ -100,18 +99,20 @@ class Receipt:
                         "yourself: `python3 -m seal verify`."),
             },
             "world_id": {
-                "state": "confirmed_one",
-                "provider": "stripe",
-                "provider_ref": "re_3P9x2ALkdIwHu7ix1a2b3c4d",
+                "state": "WORLD_FINAL",
+                "cert_tier": "WORLD_FINAL",
+                "provider_ref": ["re_3P9x2ALkdIwHu7ix1a2b3c4d"],
                 "checked_at": _fmt(now - 800),
-                "note": ("Stripe was asked directly how many refunds carry this intent's "
-                        "tag. Stripe said exactly one. This is the provider's own record, "
-                        "not our claim about it."),
+                "note": ("The provider was asked directly how many refunds carry this "
+                        "intent's tag, and answered exactly one. This is the provider's "
+                        "own record, not our claim about it."),
             },
             "off_rail_check": {
                 "swept": True,
-                "window": "±1h around this action",
+                "readable": True,
                 "out_of_band_found": 0,
+                "domain_matched": 0,
+                "unscoped_in_window": 0,
                 "note": "No spend on this domain in the window that bypassed the gateway.",
             },
             "generated_at": _fmt(now),
@@ -135,15 +136,22 @@ class Receipt:
 
         status, label = self._status(rec, once, world, off_rail)
 
+        # Amount is only known when the path went through graduated approval —
+        # an AUTO-tier intent stores no amount anywhere, so we say nothing
+        # rather than guess. A receipt that invents a figure is worse than one
+        # that omits it.
+        amount = allowed.get("amount")
         body = {
             "receipt_id": _digest({"intent": intent, "at": int(time.time())})[:12],
             "title": "Agent Authorization Receipt",
             "SAMPLE": False,
+            "summary": self._summary(rec, amount, label),
             "status": status,
             "status_label": label,
             "action": {
                 "path": rec.get("action"),
                 "domain": rec.get("domain"),
+                "amount": amount,
             },
             "allowed": allowed,
             "once": once,
@@ -188,6 +196,7 @@ class Receipt:
         approvers = [v["approver"] for v in appr["votes"] if v["decision"] == "approve"]
         return {
             "tier": appr.get("tier"),
+            "amount": appr.get("amount"),
             "requested_by": appr.get("maker"),
             "requested_at": _fmt(appr.get("created_at")),
             "state": appr.get("state"),
@@ -201,11 +210,22 @@ class Receipt:
 
     def _once_block(self, rec: dict, certs: list, chain: dict) -> dict:
         latest = certs[-1] if certs else None
+        # The FIRST cert is when the effect actually executed; later certs are
+        # witness observations appended to the same chain. A dispute asks
+        # "when did the money move", not "when did we last re-check it".
+        first = certs[0] if certs else None
+        with self.seal._connect(autocommit=True) as c:
+            pos = c.execute(
+                "SELECT seq FROM seal_certs WHERE hash=%s",
+                ((latest or {}).get("hash"),),
+            ).fetchone() if latest else None
         return {
             "intent_id": rec.get("intent"),
             "state": rec.get("state"),
             "executed": rec.get("state") == "sealed",
+            "executed_at": _fmt((first or {}).get("at")),
             "cert_hash": (latest or {}).get("hash"),
+            "chain_position": pos[0] if pos else None,
             "certs_in_chain_for_this_intent": len(certs),
             "chain_verified": chain.get("ok"),
             "note": (
@@ -224,9 +244,14 @@ class Receipt:
         # `world` on the cert is a separate human-readable label for the same
         # tier; kept below for context, never as the field callers branch on.
         tier = latest_cert.get("tier") or "SEALED"
+        # `checked_at` is only meaningful when a witness actually ran — a cert
+        # that was merely sealed has never been checked against the provider,
+        # and dating it would imply confirmation that never happened.
+        checked = _fmt(latest_cert.get("at")) if latest_cert.get("witness_state") else None
         return {
             "state": tier,
             "cert_tier": tier,
+            "checked_at": checked,
             "provider_ref": (latest_cert.get("witness_evidence") or {}).get("ids")
                 or (latest_cert.get("witness_evidence") or {}).get("matched"),
             "note": {
@@ -304,6 +329,19 @@ class Receipt:
             "note": note,
         }
 
+    def _summary(self, rec: dict, amount: float | None, label: str) -> str:
+        """One line a human reads first. Built only from what we actually know —
+        no provider name is asserted, because the witness does not record which
+        provider answered, and naming one would be a guess on a document whose
+        whole value is that nothing on it is guessed."""
+        bits = [str(rec.get("action") or "action")]
+        if amount is not None:
+            bits.append(f"${amount:,.2f}")
+        if rec.get("domain"):
+            bits.append(str(rec["domain"]))
+        bits.append(label.lower())
+        return " · ".join(bits)
+
     def _status(self, rec: dict, once: dict, world: dict, off_rail: dict) -> tuple[str, str]:
         if not once["executed"]:
             return BLOCKED, "Blocked — refused before the effect ran"
@@ -320,3 +358,155 @@ def _fmt(ts: float | None) -> str | None:
     if ts is None:
         return None
     return time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(ts))
+
+
+# ── rendering ────────────────────────────────────────────────────────────
+# Self-contained HTML on purpose: no CDN, no webfont, no external stylesheet.
+# This file gets emailed to a risk officer, opened offline, and printed to PDF
+# with Cmd+P. Anything fetched over the network would break all three, and a
+# document about provable claims cannot depend on a third party being up.
+
+_STATUS_STYLE = {
+    ALLOWED_ONCE:               ("#0a6b3d", "#e8f5ee", "CLEAR"),
+    ALLOWED_ONCE_WORLD_UNKNOWN: ("#8a6100", "#fdf4e0", "UNCONFIRMED"),
+    BLOCKED:                    ("#33415c", "#eef1f6", "BLOCKED"),
+    DIVERGED:                   ("#a1121f", "#fdeaec", "DIVERGED"),
+    OFF_RAIL:                   ("#a1121f", "#fdeaec", "OFF-RAIL"),
+}
+
+
+def _esc(v: Any) -> str:
+    s = "" if v is None else str(v)
+    return (s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+             .replace('"', "&quot;"))
+
+
+def _row(label: str, value: Any) -> str:
+    if value is None or value == [] or value == "":
+        return ""
+    if isinstance(value, list):
+        value = ", ".join(str(v) for v in value)
+    if isinstance(value, bool):
+        value = "yes" if value else "no"
+    return (f'<tr><td class="k">{_esc(label)}</td>'
+            f'<td class="v">{_esc(value)}</td></tr>')
+
+
+def render_html(receipt: dict) -> str:
+    """Render a receipt as one self-contained, printable HTML page."""
+    status = receipt.get("status", "")
+    fg, bg, short = _STATUS_STYLE.get(status, ("#33415c", "#eef1f6", "UNKNOWN"))
+    a = receipt.get("allowed", {}) or {}
+    o = receipt.get("once", {}) or {}
+    w = receipt.get("world_id", {}) or {}
+    f = receipt.get("off_rail_check", {}) or {}
+    act = receipt.get("action", {}) or {}
+    is_sample = bool(receipt.get("SAMPLE"))
+
+    sample_banner = (
+        f'<div class="sample">SAMPLE — {_esc(receipt.get("sample_notice", ""))}</div>'
+        if is_sample else ""
+    )
+
+    return f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Agent Authorization Receipt — {_esc(receipt.get('receipt_id',''))}</title>
+<style>
+  :root {{ color-scheme: light; }}
+  * {{ box-sizing: border-box; }}
+  body {{ margin:0; padding:32px 20px; background:#f4f5f7; color:#16202e;
+         font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }}
+  .page {{ max-width:760px; margin:0 auto; background:#fff; border:1px solid #dfe3e8;
+           border-radius:10px; padding:36px 40px; }}
+  h1 {{ font-size:21px; margin:0 0 2px; letter-spacing:-.2px; }}
+  .sub {{ color:#5b6878; font-size:13px; margin-bottom:22px; }}
+  .sample {{ background:#fff6d8; border:1px solid #e6c86a; color:#6b4e00;
+             padding:10px 14px; border-radius:7px; font-size:13px; margin-bottom:20px; }}
+  .status {{ display:flex; align-items:center; gap:12px; background:{bg};
+             border:1px solid {fg}33; border-radius:8px; padding:14px 18px; margin-bottom:8px; }}
+  .badge {{ background:{fg}; color:#fff; font-weight:700; font-size:12px;
+            letter-spacing:.7px; padding:5px 11px; border-radius:5px; white-space:nowrap; }}
+  .status .lbl {{ color:{fg}; font-weight:600; font-size:15px; }}
+  .summary {{ color:#3d4b5c; font-size:14px; margin:0 0 26px; }}
+  h2 {{ font-size:12px; letter-spacing:1.1px; text-transform:uppercase; color:#6b7A8d;
+        margin:26px 0 8px; padding-bottom:6px; border-bottom:1px solid #e8ebef; }}
+  table {{ width:100%; border-collapse:collapse; }}
+  td {{ padding:5px 0; vertical-align:top; font-size:14px; }}
+  td.k {{ color:#63718a; width:200px; padding-right:14px; }}
+  td.v {{ color:#16202e; word-break:break-word; }}
+  .note {{ background:#f7f9fb; border-left:3px solid #c9d3de; padding:9px 13px;
+           margin-top:9px; font-size:13px; color:#465468; border-radius:0 5px 5px 0; }}
+  .foot {{ margin-top:30px; padding-top:18px; border-top:1px solid #e8ebef;
+           font-size:12.5px; color:#5b6878; }}
+  code {{ background:#eef1f5; padding:2px 6px; border-radius:4px;
+          font:12.5px ui-monospace,SFMono-Regular,Menlo,monospace; }}
+  @media print {{
+    body {{ background:#fff; padding:0; }}
+    .page {{ border:none; border-radius:0; padding:0; max-width:none; }}
+    h2 {{ break-after:avoid; }} table {{ break-inside:avoid; }}
+  }}
+</style></head><body><div class="page">
+
+  <h1>Agent Authorization Receipt</h1>
+  <div class="sub">Receipt {_esc(receipt.get('receipt_id',''))} · generated {_esc(receipt.get('generated_at',''))}</div>
+  {sample_banner}
+
+  <div class="status">
+    <span class="badge">{_esc(short)}</span>
+    <span class="lbl">{_esc(receipt.get('status_label',''))}</span>
+  </div>
+  <p class="summary">{_esc(receipt.get('summary') or _esc(act.get('path') or ''))}</p>
+
+  <h2>Was it allowed?</h2>
+  <table>
+    {_row("Action", act.get("path"))}
+    {_row("Amount", act.get("amount"))}
+    {_row("Domain", act.get("domain"))}
+    {_row("Authorisation tier", a.get("tier"))}
+    {_row("Requested by", a.get("requested_by"))}
+    {_row("Requested at", a.get("requested_at"))}
+    {_row("Approved by", a.get("approved_by"))}
+    {_row("Self-approval blocked", a.get("self_approval_blocked"))}
+    {_row("Approval state", a.get("state"))}
+  </table>
+  {f'<div class="note">{_esc(a.get("note"))}</div>' if a.get("note") else ""}
+
+  <h2>Did it run exactly once?</h2>
+  <table>
+    {_row("Intent id", o.get("intent_id"))}
+    {_row("Executed", o.get("executed"))}
+    {_row("Executed at", o.get("executed_at"))}
+    {_row("Certificate", o.get("cert_hash"))}
+    {_row("Chain verified", o.get("chain_verified"))}
+  </table>
+  {f'<div class="note">{_esc(o.get("note"))}</div>' if o.get("note") else ""}
+
+  <h2>What does the provider say?</h2>
+  <table>
+    {_row("Confirmation state", w.get("state"))}
+    {_row("Provider reference", w.get("provider_ref"))}
+    {_row("Checked at", w.get("checked_at"))}
+  </table>
+  {f'<div class="note">{_esc(w.get("note"))}</div>' if w.get("note") else ""}
+
+  <h2>Did anything bypass the gateway?</h2>
+  <table>
+    {_row("Window swept", f.get("swept"))}
+    {_row("Sweep readable", f.get("readable"))}
+    {_row("Out-of-band effects found", f.get("out_of_band_found"))}
+    {_row("Matched this domain", f.get("domain_matched"))}
+    {_row("Unscoped in window", f.get("unscoped_in_window"))}
+  </table>
+  {f'<div class="note">{_esc(f.get("note"))}</div>' if f.get("note") else ""}
+
+  <div class="foot">
+    <p><strong>Verify this yourself.</strong> Nothing here requires trusting AurumFlux —
+    the certificate chain re-derives from your own database:<br>
+    <code>{_esc(receipt.get('verify_yourself',''))}</code></p>
+    <p>{_esc(receipt.get('honesty') or
+        'Dispute-grade evidence, not a legal or notarial instrument. Not court-certified, '
+        'not insurance. UNKNOWN is never reported as clean.')}</p>
+    {f"<p>Receipt digest: <code>{_esc(receipt.get('receipt_digest'))}</code></p>" if receipt.get("receipt_digest") else ""}
+  </div>
+
+</div></body></html>"""

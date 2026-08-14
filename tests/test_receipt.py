@@ -200,3 +200,107 @@ def test_receipt_carries_a_digest_over_its_own_content(seal):
     seal.seal(adm.intent, adm.fence, {"ok": True})
     r = Receipt(seal).build(adm.intent)
     assert "receipt_digest" in r and len(r["receipt_digest"]) > 20
+
+
+# ── HTML rendering — the shareable artifact ──────────────────────────────
+def test_sample_renders_to_self_contained_html():
+    from seal.receipt import render_html
+    html = render_html(Receipt.sample())
+    assert html.startswith("<!DOCTYPE html>")
+    # self-contained: nothing fetched over the network, or it breaks offline
+    # and when emailed, and a proof document cannot depend on a third party
+    for bad in ("http://", "https://cdn", "<script", "@import", "src="):
+        assert bad not in html.lower().replace("github.com", ""), f"external/unsafe: {bad}"
+    assert "Agent Authorization Receipt" in html
+
+
+def test_render_escapes_html_so_a_receipt_cannot_be_forged_visually(seal):
+    """Approver names and paths are attacker-influenced. If they render as raw
+    HTML, someone could inject markup that makes a DIVERGED receipt LOOK clean
+    — forging the exact document a dispute relies on."""
+    from seal.receipt import render_html
+    gc = GraduatedClearance(seal, gov_key=b"fixed-test-key")
+    gc.set_thresholds("charge", auto_ceiling=100, dual_ceiling=10_000, required_approvers=2)
+    adm = seal.admit("charge", {"amount": 5000}, key="xss-1")
+    req = gc.request("charge", 5000, maker="agent:x", intent=adm.intent)
+    gc.add_vote(req["id"], '<script>alert(1)</script>', APPROVE)
+    gc.add_vote(req["id"], "sam@ops", APPROVE)
+    seal.seal(adm.intent, adm.fence, {"ok": True})
+
+    html = render_html(Receipt(seal).build(adm.intent))
+    assert "<script>alert(1)</script>" not in html
+    assert "&lt;script&gt;" in html
+
+
+def test_rendered_status_matches_the_receipt_status(seal):
+    """The badge a human reads must never disagree with the machine status."""
+    from seal.receipt import render_html
+    adm = seal.admit("charge", {"amount": 10}, key="render-blocked")
+    html = render_html(Receipt(seal).build(adm.intent))   # never sealed -> BLOCKED
+    assert "BLOCKED" in html
+
+
+def test_diverged_receipt_renders_as_diverged_not_clear(seal):
+    from seal.receipt import render_html
+    adm = seal.admit("charge", {"amount": 10}, key="render-div", domain="cust:9")
+    seal.seal(adm.intent, adm.fence, {"ok": True})
+    seal.witness(adm.intent, CallableWitness(lambda rec: WitnessResult(MULTIPLE, count=2)))
+    html = render_html(Receipt(seal).build(adm.intent))
+    assert "DIVERGED" in html
+    assert "CLEAR" not in html
+
+
+def test_sample_never_promises_fields_a_real_receipt_cannot_produce(seal):
+    """A sample that advertises fields the product doesn't deliver is the same
+    over-promise we report to other projects. Locks sample/real parity."""
+    gc = GraduatedClearance(seal, gov_key=b"fixed-test-key")
+    gc.set_thresholds("refund", auto_ceiling=100, dual_ceiling=10_000, required_approvers=2)
+    adm = seal.admit("refund", {"amount": 4900}, key="parity-1", domain="cus_1")
+    req = gc.request("refund", 4900, maker="agent:bot", intent=adm.intent)
+    gc.add_vote(req["id"], "dana@finance", APPROVE)
+    gc.add_vote(req["id"], "sam@ops", APPROVE)
+    seal.seal(adm.intent, adm.fence, {"ok": True})
+    seal.witness(adm.intent, CallableWitness(
+        lambda r: WitnessResult(CONFIRMED_ONE, count=1, evidence={"ids": ["re_x"]})))
+
+    real = Receipt(seal).build(adm.intent)
+    sample = Receipt.sample()
+    ignore_top = {"SAMPLE", "sample_notice"}
+    assert not (set(sample) - set(real) - ignore_top), \
+        f"sample promises top-level fields real lacks: {set(sample)-set(real)-ignore_top}"
+    for blk in ("action", "allowed", "once", "world_id", "off_rail_check"):
+        missing = set(sample.get(blk, {})) - set(real.get(blk, {}))
+        assert not missing, f"sample.{blk} promises fields real lacks: {sorted(missing)}"
+
+
+def test_real_receipt_carries_amount_and_execution_time(seal):
+    """A dispute document about money must show the amount and when it ran."""
+    gc = GraduatedClearance(seal, gov_key=b"fixed-test-key")
+    gc.set_thresholds("refund", auto_ceiling=100, dual_ceiling=10_000, required_approvers=2)
+    adm = seal.admit("refund", {"amount": 4900}, key="amt-1", domain="cus_2")
+    req = gc.request("refund", 4900, maker="agent:bot", intent=adm.intent)
+    gc.add_vote(req["id"], "dana@finance", APPROVE)
+    gc.add_vote(req["id"], "sam@ops", APPROVE)
+    seal.seal(adm.intent, adm.fence, {"ok": True})
+
+    r = Receipt(seal).build(adm.intent)
+    assert r["action"]["amount"] == 4900
+    assert r["once"]["executed_at"] is not None
+    assert r["once"]["chain_position"] is not None
+    assert "4,900.00" in r["summary"]
+
+
+def test_auto_tier_omits_amount_rather_than_guessing(seal):
+    """No amount is stored for AUTO-tier intents. Omit it; never invent one."""
+    adm = seal.admit("charge", {"amount": 50}, key="auto-amt")
+    seal.seal(adm.intent, adm.fence, {"ok": True})
+    r = Receipt(seal).build(adm.intent)
+    assert r["action"]["amount"] is None
+
+
+def test_checked_at_absent_until_a_witness_actually_ran(seal):
+    """Dating a provider check that never happened would imply confirmation."""
+    adm = seal.admit("charge", {"amount": 10}, key="nocheck-1")
+    seal.seal(adm.intent, adm.fence, {"ok": True})
+    r = Receipt(seal).build(adm.intent)
+    assert r["world_id"]["checked_at"] is None
