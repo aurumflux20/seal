@@ -81,6 +81,33 @@ work; none surfaced from a passing suite:**
    Idempotent has to mean the STATE repeats, not just the side effect. **Found
    by the end-to-end demo, which the unit tests had missed** — they asserted
    the refund ran once and stopped there.
+7. **The gateway double-charged across processes — our own bug, our own thesis.**
+   `Gateway.execute()` guarded ticket replay with `self._spent`, an in-process
+   Python set. A restarted gateway — or a second replica sharing
+   `SEAL_TICKET_KEY`, which replicas *must* share to function at all — starts
+   with an empty set. It re-verified an already-spent ticket, **called the
+   provider a second time, and only then failed to seal.** The caller received
+   `NotFenceHolder` and would reasonably read it as "it didn't work", while the
+   money had moved twice and the certificate chain recorded once.
+
+   Counted, not inferred — the executor appends to a file, so the claim is a
+   counter rather than an opinion:
+
+   ```
+   before:  ['charge:7700', 'charge:7700']
+   after:   ['charge:7700']
+   ```
+
+   This is check-then-act across a process boundary: precisely the defect this
+   library exists to prevent, living inside this library. **No single-process
+   test can see it** — it only appears when you drive the MCP server as two
+   separate processes, which is how agent teams actually deploy. Fixed with the
+   kernel's own idiom: a `seal_tickets` row claimed via
+   `INSERT ... ON CONFLICT DO NOTHING` *before* the executor is called. Losing
+   that race now raises `TicketAlreadySpent` and the provider is never touched.
+
+   Worth stating plainly, since it is the exact failure we sell against: an
+   audit log that says one charge does not prove the provider only took one.
 
 **Honest limits (measured, not hidden):**
 1. Raw one-connection-per-call still isn't how you'd run this in production — put
