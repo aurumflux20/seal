@@ -264,13 +264,17 @@ World confirmation (provider adapters that flip that field against Stripe's or
 your provider's own records) is the next layer, and the cert schema already
 carries the field so the format won't break.
 
-## Relationship to once-kernel and effectfence
+## Relationship to once-kernel, effectfence, and coherence
 
 [`once-kernel`](https://github.com/aurumflux20/once-kernel-ts) proves one
 *process* didn't run an effect twice. [`effectfence`](https://github.com/aurumflux20/effectfence)
 guards one MCP server. Seal is the cross-process layer above both, for the
 moment your agents outgrow a single machine. The free primitives stay free
 (Apache-2.0 / MIT), forever.
+
+For **claim vs proven** on agent PRs and CI (said it ≠ showed it), see the
+separate project [`coherence`](https://github.com/aurumflux20/coherence) —
+not part of this repo; different package, different git history.
 
 ## License
 
