@@ -39,14 +39,22 @@ numbers, including the honest limits: [STORM-PROOF.md](STORM-PROOF.md).
 Run it yourself:
 
 ```bash
-# Needs Python 3.10+ and a modern pip. macOS ships 3.9 with pip 21, which fails
-# on an editable install from pyproject.toml with a misleading "setup.py not
-# found" error — so create a venv rather than debugging that.
-python3 --version                      # want 3.10 or newer
-# older? macOS:  brew install python@3.12   (or use pyenv / uv)
+pip install seal-kernel
+
+export SEAL_DSN="host=... dbname=seal"
+python3 -m seal verify          # chain check, no network, no trust in us
+```
+
+To run the 1,000-thread storm proof yourself, clone the repo (the harness
+ships with the source, not the wheel):
+
+```bash
+# Needs Python 3.10+. macOS ships 3.9 with pip 21, which fails an editable
+# install with a misleading "setup.py not found" error — use a venv rather
+# than debugging that.
+git clone https://github.com/aurumflux20/seal && cd seal
 python3 -m venv .venv && source .venv/bin/activate
-python3 -m pip install -U pip
-python3 -m pip install -e .
+python3 -m pip install -U pip && python3 -m pip install -e .
 
 export SEAL_DSN="host=... dbname=seal"
 python3 storm.py --n 1000
