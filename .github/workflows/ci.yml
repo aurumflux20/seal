@@ -23,6 +23,10 @@ jobs:
           --health-retries 10
     env:
       SEAL_DSN: host=localhost port=5432 user=seal password=seal dbname=seal
+      # Fail the run if every test skipped. Without this, a postgres
+      # service that failed to start would report green having proven
+      # nothing -- see conftest.py.
+      SEAL_REQUIRE_TESTS: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
