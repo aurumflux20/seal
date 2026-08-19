@@ -16,7 +16,7 @@ import pytest
 
 from seal import Seal
 from seal.authority import (
-    Gateway, InvalidTicket, NoSuchExecutor, Ticket,
+    AmbiguousOutcome, Gateway, InvalidTicket, NoSuchExecutor, NotDispatched, Ticket,
 )
 from seal.budget import Budget, BudgetExceeded
 from seal.clearance import CLEARED, Clearance
@@ -213,13 +213,16 @@ def test_second_agent_cannot_double_click_through_the_gateway(gw: Gateway):
     assert len(gw._test_calls) == 1                # exactly one real charge
 
 
-def test_budget_is_reserved_before_ticket_and_released_on_executor_failure(gw: Gateway):
+def test_ambiguous_executor_failure_keeps_the_claim_and_the_budget(gw: Gateway):
+    """A timeout is the case where the money MAY have moved. The gateway
+    cannot tell it apart from a clean miss, so it must not release the claim:
+    deleting the intent is what lets the next attempt charge a second time."""
     Budget(gw.seal).set_limit("cust:9", limit=100, window_sec=3600)
 
-    def failing(args):
-        raise RuntimeError("provider timeout")
+    def timing_out(args):
+        raise RuntimeError("provider timeout")   # outcome genuinely unknown
 
-    gw.register_executor("payout", failing)
+    gw.register_executor("payout", timing_out)
     Clearance(gw.seal).set_policy("payout", CLEARED)
     Clearance(gw.seal).record_proof("payout", green=True)
 
@@ -227,10 +230,36 @@ def test_budget_is_reserved_before_ticket_and_released_on_executor_failure(gw: G
                        budget_key="cust:9", amount=60)
     assert Budget(gw.seal).remaining("cust:9") == 40    # reserved
 
-    with pytest.raises(RuntimeError):
+    with pytest.raises(AmbiguousOutcome):
         gw.execute(prop["ticket"], {"amount": 60})
 
-    assert Budget(gw.seal).remaining("cust:9") == 100   # released, effect never happened
+    # The claim must still stand — a blind retry must not be able to re-execute.
+    assert gw.seal.get(prop["intent"])["state"] == "open"
+    # And the budget stays spent: we cannot prove the money did not move.
+    assert Budget(gw.seal).remaining("cust:9") == 40
+
+
+def test_proven_non_dispatch_releases_the_claim_and_the_budget(gw: Gateway):
+    """When the executor can PROVE it never reached the provider, the claim is
+    safe to release — otherwise a pre-flight validation error would wedge the
+    intent until its lease expired."""
+    Budget(gw.seal).set_limit("cust:11", limit=100, window_sec=3600)
+
+    def never_dispatched(args):
+        raise NotDispatched("argument shape rejected before any network call")
+
+    gw.register_executor("payout2", never_dispatched)
+    Clearance(gw.seal).set_policy("payout2", CLEARED)
+    Clearance(gw.seal).record_proof("payout2", green=True)
+
+    prop = gw.propose("payout2", {"amount": 60}, key="pay-2",
+                       budget_key="cust:11", amount=60)
+    assert Budget(gw.seal).remaining("cust:11") == 40   # reserved
+
+    with pytest.raises(NotDispatched):
+        gw.execute(prop["ticket"], {"amount": 60})
+
+    assert Budget(gw.seal).remaining("cust:11") == 100  # released: nothing happened
 
 
 def test_budget_exceeded_refuses_the_ticket_not_just_the_charge(gw: Gateway):

@@ -57,6 +57,31 @@ class InvalidTicket(AuthorityError):
     """The ticket is forged, expired, already spent, or for another intent."""
 
 
+class AmbiguousOutcome(AuthorityError):
+    """The provider was called and the outcome is unknown.
+
+    The claim is deliberately left standing so a blind retry cannot re-execute
+    the effect. Resolve it by witnessing the provider (reconcile), not by
+    retrying.
+    """
+
+
+class NotDispatched(AuthorityError):
+    """Raised BY AN EXECUTOR to prove the provider was never contacted.
+
+    The gateway cannot tell a pre-flight validation error from a timeout that
+    already moved money -- both surface as an exception out of ``fn(args)``.
+    Deleting the claim on the second kind is how a retry double-charges, so
+    the gateway now keeps the claim on ANY ordinary exception.
+
+    An executor that KNOWS it never reached the provider (bad argument shape,
+    a client-side guard, a connection that was never opened) raises this to
+    say so, and the claim is released for a clean retry. Raise it only when
+    non-dispatch is certain; when in doubt, raise anything else and let the
+    claim stand for witnessing.
+    """
+
+
 class TicketAlreadySpent(InvalidTicket):
     """This exact ticket has already been executed — proven from the STORE.
 
@@ -111,6 +136,24 @@ class Gateway:
         self._ttl = ticket_ttl_sec
         self._executors: dict[str, Callable[[dict], Any]] = {}
         self._spent: set[str] = set()
+        # Per-path witnesses. Without one, a crash between "provider charged"
+        # and "sealed" leaves the intent open; when its lease expires the
+        # reclaim hands out a fresh claim and the effect runs a SECOND time.
+        # The witness is the only thing that can ask the provider "did this
+        # already happen?" before that reclaim. See register_witness.
+        self._witnesses: dict[str, Any] = {}
+
+    def register_witness(self, path: str, witness: Any) -> None:
+        """Bind a path to the witness that can ask the provider what happened.
+
+        Strongly recommended for any irreversible path. If the gateway dies
+        between calling the provider and sealing, the lease eventually expires
+        and the intent is reclaimed -- and without a witness the reclaimer has
+        no way to know the effect already fired, so it fires again. With one,
+        a CONFIRMED_ONE probe heals the record instead of re-executing, and an
+        UNKNOWN probe stands the attempt down for reconciliation.
+        """
+        self._witnesses[path] = witness
 
     # ── registration: where secrets live, and nowhere else ────────────────
     def register_executor(self, path: str, fn: Callable[[dict], Any]) -> None:
@@ -177,6 +220,7 @@ class Gateway:
         # requirement it is currently checking."
         adm = self.seal.admit(path, args, key=key, domain=domain, path=path,
                               read_set=read_set, checker=checker,
+                              heal_with=self._witnesses.get(path),
                               _mandate_exempt=True)
 
         if not adm.fresh:
@@ -327,11 +371,28 @@ class Gateway:
 
         try:
             result = fn(args)                      # the ONLY place the secret is used
-        except Exception as e:
+        except NotDispatched as e:
+            # The executor PROVED the provider was never contacted, so nothing
+            # irreversible happened: release the claim for a clean retry and
+            # give the budget back. This is the only safe path to fail().
             if reservation is not None:
-                reservation.release()              # nothing happened; give budget back
-            self.seal.fail(t.intent, t.fence, f"executor failed: {e!r}")
+                reservation.release()
+            self.seal.fail(t.intent, t.fence, f"not dispatched: {e!r}")
             raise
+        except Exception as e:
+            # AMBIGUOUS. A timeout, a 5xx, a dropped connection -- the provider
+            # may well have acted. `fail()` DELETES the intent (its own
+            # docstring: "If the effect may have fired, do NOT call this"), so
+            # calling it here is what lets the next attempt charge a second
+            # time. Keep the claim and the budget: the intent stays open, its
+            # lease expires, and the witness/reconcile path decides whether the
+            # effect landed. Refusing to guess is the whole product.
+            raise AmbiguousOutcome(
+                f"executor for intent {t.intent} failed AFTER the provider was "
+                f"called; the effect may have fired. The claim is intentionally "
+                f"NOT released -- reconcile (witness the provider) before "
+                f"retrying. Cause: {e!r}"
+            ) from e
 
         self._spent.add(t.sig)
         if reservation is not None:

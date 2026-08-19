@@ -15,7 +15,7 @@ from seal import Seal
 from seal.clearance import (
     CLEARED, HOLD, REVOKED, Clearance, ClearanceDenied,
 )
-from seal.witness import CONFIRMED_ONE, UNKNOWN, CallableWitness, WitnessResult
+from seal.witness import ABSENT, CONFIRMED_ONE, UNKNOWN, CallableWitness, WitnessResult
 
 DSN = os.environ.get("SEAL_DSN")
 pytestmark = pytest.mark.skipif(not DSN, reason="SEAL_DSN not set")
@@ -141,17 +141,33 @@ def test_heal_on_reclaim_does_not_re_execute(cl):
     assert fast.get(a.intent)["tier"] == "WORLD_FINAL"
 
 
-def test_unknown_world_does_not_heal(cl):
-    """UNKNOWN must never be treated as 'it happened' — that would fabricate a
-    receipt for an effect we cannot see."""
+def test_unknown_world_neither_heals_nor_re_executes(cl):
+    """UNKNOWN must never be treated as 'it happened' — that fabricates a
+    receipt for an effect we cannot see. It must equally never be treated as
+    'it did not happen': handing out a fresh claim re-runs an effect that may
+    already have charged. The only safe answer is to stand down."""
     fast = Seal(DSN, lease_sec=0.05)
     fast.setup()
     a = fast.admit("charge", {"o": 10}, key="heal-2")
     time.sleep(0.15)
     w = CallableWitness(lambda rec: WitnessResult(UNKNOWN))
     b = fast.admit("charge", {"o": 10}, key="heal-2", heal_with=w)
-    assert b.fresh                      # falls through to normal reclaim
-    assert fast.get(a.intent)["state"] == "open"
+    assert not b.fresh                  # must NOT license a second execution
+    assert b.cert is None               # and must NOT fabricate a receipt
+    assert fast.get(a.intent)["state"] == "open"   # left for reconciliation
+
+
+def test_absent_world_may_be_reclaimed(cl):
+    """ABSENT is the provider answering definitively 'none exist'. That is the
+    one probe result where re-running is safe, and it must stay allowed —
+    otherwise a crashed-before-dispatch intent would be stuck forever."""
+    fast = Seal(DSN, lease_sec=0.05)
+    fast.setup()
+    fast.admit("charge", {"o": 11}, key="heal-absent")
+    time.sleep(0.15)
+    w = CallableWitness(lambda rec: WitnessResult(ABSENT))
+    b = fast.admit("charge", {"o": 11}, key="heal-absent", heal_with=w)
+    assert b.fresh                      # safe to execute: the world has nothing
 
 
 # ── the artifact procurement reads ─────────────────────────────────────────

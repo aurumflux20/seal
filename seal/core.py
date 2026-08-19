@@ -617,11 +617,21 @@ class Seal:
                 # unreachable / not yet indexed) must NOT heal and must NOT
                 # re-execute blindly — it falls through to the normal reclaim,
                 # because guessing either way here is how money gets doubled.
-                from .witness import CONFIRMED_ONE
+                from .witness import ABSENT, CONFIRMED_ONE
                 probe = heal_with.look({"intent": iid, "action": action})
                 if probe.state == CONFIRMED_ONE:
                     healed = self._heal(iid, probe)
                     return Admission(fresh=False, intent=iid, fence="", cert=healed)
+                if probe.state != ABSENT:
+                    # UNKNOWN or MULTIPLE. The comment above is the rule: do not
+                    # heal AND do not re-execute. Falling through to the reclaim
+                    # below would return fresh=True -- which IS re-executing,
+                    # exactly what the rule forbids and what DEPLOYMENT.md rule 5
+                    # ("never auto-retry the effect on UNKNOWN") prohibits. A
+                    # provider that is briefly unreachable answers UNKNOWN, and
+                    # that is precisely when a second charge must not happen.
+                    # Stand down: the claim keeps standing for reconciliation.
+                    return Admission(fresh=False, intent=iid, fence="", cert=cert)
             if state == "open" and lease_until < now:
                 # The holder crashed mid-effect. Reclaim atomically: only if the
                 # lease is still dead at write time (another reclaimer may beat us).
