@@ -28,6 +28,10 @@ Nobody types the level.**
 SEAL_DSN="..." python3 license_demo.py     # watch a path earn L3 and lose it
 ```
 
+> **Want this checked on your own money path?** We do a fixed-price
+> [Retry Safety Review](SUPPORT.md) — $1,200, and **no invoice if we find
+> nothing**. Five days, written report, your file and line numbers.
+
 Slow to earn, instant to lose — the only shape that makes a track record mean
 anything. The full level definitions: [docs/AUTONOMY-LEVELS.md](docs/AUTONOMY-LEVELS.md).
 
