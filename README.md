@@ -1,9 +1,38 @@
 # seal
 
-**Exactly-once admission for irreversible agent actions, across processes.**
+**Your agents earn the right to spend without you.**
 
 > Not an engineer? Read [docs/PLAIN-ENGLISH.md](docs/PLAIN-ENGLISH.md) instead —
 > the same thing with no jargon, including what we can't do.
+
+Everyone else ships a *lock*: a spend cap you set once and forget. The cap never
+learns, so an agent that has settled ten thousand clean payments is trusted
+exactly as little as the one you installed this morning — and you keep clicking
+Approve.
+
+Seal ships the *unlock*. It reads what a payment path has actually proven —
+settlements the provider confirmed, sweeps showing nothing moved behind its back —
+and computes the autonomy that path has earned. **L0 OBSERVED → L5 AUTONOMOUS.
+Nobody types the level.**
+
+```
+████████············  L2 ASSISTED      50 proven · 100% confirmed   [human required]
+     fifty settlements — but volume alone is not trust.
+████████████········  L3 DELEGATED     50 proven · 100% confirmed   [unattended]
+     one clean sweep later: the human stops clicking Approve.
+····················  L0 OBSERVED      50 proven · 100% confirmed   [SUSPENDED]
+     one charge the gateway never admitted. fifty clean ones don't outweigh it.
+```
+
+```bash
+SEAL_DSN="..." python3 license_demo.py     # watch a path earn L3 and lose it
+```
+
+Slow to earn, instant to lose — the only shape that makes a track record mean
+anything. The ruler is public and free to implement, including by competitors:
+[docs/AUTONOMY-LEVELS.md](docs/AUTONOMY-LEVELS.md).
+
+## Underneath: exactly-once admission
 
 Two different agents, on two different machines, both decide to charge order 123
 at the same instant. In-process idempotency can't help — the guard has to live in
