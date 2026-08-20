@@ -29,8 +29,7 @@ SEAL_DSN="..." python3 license_demo.py     # watch a path earn L3 and lose it
 ```
 
 Slow to earn, instant to lose — the only shape that makes a track record mean
-anything. The ruler is public and free to implement, including by competitors:
-[docs/AUTONOMY-LEVELS.md](docs/AUTONOMY-LEVELS.md).
+anything. The full level definitions: [docs/AUTONOMY-LEVELS.md](docs/AUTONOMY-LEVELS.md).
 
 ## Underneath: exactly-once admission
 
