@@ -1,7 +1,6 @@
 # Autonomy Levels for agents that spend money (L0–L5)
 
-*A proposed common vocabulary. Version 0.1 — open to correction, and written to
-be argued with.*
+*Version 0.1 — the definitions Seal is built and measured against.*
 
 Self-driving cars got a shared ruler in 2014. Before SAE J3016 every carmaker
 had its own word for how much the car did — "autopilot", "co-pilot",
@@ -84,21 +83,15 @@ earn, instant to lose.
 
 ---
 
-## Why propose this at all
+## Why write this down
 
 We build one implementation of it ([Seal](https://github.com/aurumflux20/seal)
 computes these levels from its own ledger and suspends on out-of-band spend), so
 this is not a neutral document and we would rather say so than pretend.
 
-But the vocabulary is worth more shared than owned. Today a buyer cannot compare
-two agent-payment products, and every vendor grades its own homework — including
-us. A ruler that anyone can apply, to anyone's system, is better for the buyer
-than six brochures.
+Buyers deserve a testable meaning behind the word "autonomous". This is the
+definition Seal is built and measured against.
 
 If you think a level is drawn in the wrong place, or a criterion is missing, the
 useful reply is a concrete one: which path, which evidence, what should have
-been required instead. Corrections that make this harder to satisfy are the most
-welcome kind.
-
-*Apache-2.0 — this document is free to copy, quote, adapt, or implement, with or
-without attribution, including by competitors.*
+been required instead.
