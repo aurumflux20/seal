@@ -5,6 +5,7 @@
 Demo A  two agents double-click            → exactly ONE charge
 Demo B  the world is asked, and disagrees  → WORLD_DIVERGED, domain frozen
 Demo C  a checkout fails halfway           → sealed refund, GRAPH_COMPENSATED
+Demo D  spend that bypassed the gateway    → OUT_OF_BAND, domain frozen
 
 Every number printed is measured, not asserted: the "charge" and "refund"
 functions increment real counters, so if the property broke, the demo says so
@@ -14,6 +15,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 import threading
 
 import psycopg
@@ -22,6 +24,7 @@ from seal import Seal
 from seal.core import TIER_WORLD_FINAL
 from seal.graph import GRAPH_COMPENSATED, GRAPH_FINAL, EffectGraph
 from seal.witness import CONFIRMED_ONE, MULTIPLE, CallableWitness, WitnessResult
+from seal.reconcile import CLEAN, OUT_OF_BAND, CallableLister, ProviderEffect, Reconciler
 
 DSN = os.environ["SEAL_DSN"]
 ok = True
@@ -141,6 +144,45 @@ check("real refunds executed", refunds["n"], 1)
 check("graph state", g.get("checkout:1001")["state"], GRAPH_COMPENSATED)
 check("refund cert links to the charge it reverses", bool(cert["compensates_cert"]), True)
 check("whole chain still verifies", seal.verify_chain()["ok"], True)
+
+# ── D · spend that never passed through the gateway ───────────────────
+head("D", "A charge that bypassed the gateway entirely")
+reset(seal)
+t0 = time.time() - 60
+
+# One legitimate charge, admitted and sealed the normal way.
+adm = seal.admit("charge", {"amount": 4900}, key="order-2001", domain="charge")
+seal.seal(adm.intent, adm.fence, {"charged": 4900})
+print("     1 charge admitted + sealed through the gateway (the honest one)")
+
+# The provider's ledger holds THREE charges. Two never passed through us:
+# a leaked API key firing directly, and a tag from a store we don't know.
+def provider_ledger(since, until):
+    return [
+        ProviderEffect(id="pi_legit", amount=4900, intent_tag=adm.intent),
+        ProviderEffect(id="pi_rogue_key", amount=25000, intent_tag=None),
+        ProviderEffect(id="pi_forged", amount=9900, intent_tag="intent-we-never-issued"),
+    ]
+
+print("     provider ledger actually shows 3 charges\n")
+rep = Reconciler(seal).sweep(CallableLister(provider_ledger), since=t0,
+                             freeze_domain="charge")
+
+check("verdict", rep["verdict"], OUT_OF_BAND)
+check("charges we authorised", rep["matched_our_certs"], 1)
+check("spend that bypassed the gateway", rep["out_of_band"], 2)
+check("unauthorised amount caught (cents)", rep["out_of_band_amount"], 34900)
+check("domain frozen on detection", rep.get("domain_frozen"), "charge")
+print(f"     caught: {rep['out_of_band_ids']}")
+
+# A provider we cannot enumerate must never be reported as clean.
+def provider_down(since, until):
+    raise RuntimeError("stripe API unreachable")
+
+down = Reconciler(seal).sweep(CallableLister(provider_down), since=t0)
+check("provider unreachable is NOT reported clean", down["verdict"] != CLEAN, True)
+print(f"     verdict when the provider is down: {down['verdict']}")
+
 
 print(f"\n{'━'*66}")
 print("  ✅ ALL DEMOS PASSED" if ok else "  ❌ A DEMO FAILED — see above")
