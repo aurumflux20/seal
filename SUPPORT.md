@@ -1,6 +1,6 @@
 # Commercial support
 
-## Retry Safety Review — $1,200, and you pay nothing if we find nothing
+## Retry Safety Review — $1,200, refunded in full if we find nothing
 
 We read one money path in your codebase — the tool, SDK or service that
 actually moves funds — and hunt one specific class of defect: **what happens
@@ -16,8 +16,9 @@ fresh nonce, the reservation released on a failure that wasn't a failure, the
 numbers, with a reproduction where one is possible and a recommended fix.
 Written only — no calls, no meetings.
 
-**You pay $1,200 if we find a real defect. If we find nothing, there is no
-invoice** — you keep the report saying so, which is itself worth having.
+**You pay $1,200 up front at checkout. If we find no real defect, we refund it
+in full** — and you keep the report saying so, which is worth having on its
+own.
 
 **Turnaround:** five working days from access.
 
