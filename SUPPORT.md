@@ -53,9 +53,13 @@ channel, monthly range report.
 
 ### How to start
 
-Open an issue on this repository titled `review request`, or email
-**hello@aurumflux.co** with the repository or service and which money path
-matters most. A reply comes in writing, usually the same day.
+**[Book a review — $1,200](https://buy.stripe.com/28E7sL91C9naapQbBVdIA0l)** · after checkout, reply to the receipt with
+the repository or service and which money path matters most. Work starts the
+same day.
+
+Prefer to talk first? Email **hello@aurumflux.co**, or open an issue on this
+repository titled `review request`. A reply comes in writing, usually the same
+day. If we don't think we can find anything, we say so before you pay.
 
 We will say no if we don't think we can find anything — a review that bills you
 for a clean bill of health is a bad trade for both of us.
