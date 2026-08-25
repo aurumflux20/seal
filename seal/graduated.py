@@ -92,7 +92,16 @@ class Threshold:
 class GraduatedClearance:
     def __init__(self, seal: Seal, gov_key: bytes | None = None):
         self.seal = seal
-        self._key = gov_key or os.environ.get("SEAL_GOV_KEY", "").encode() or secrets.token_bytes(32)
+        configured = gov_key or os.environ.get("SEAL_GOV_KEY", "").encode()
+        # An unconfigured deployment used to get secrets.token_bytes(32) with
+        # no signal at all. That key dies with the process, so votes signed by
+        # one replica could never be checked by another and nothing survived a
+        # restart — the signature looked like evidence and proved nothing.
+        # The fallback stays (refusing here would lock an operator out of
+        # their own approval queue), but it is now recorded, so verify_votes()
+        # and the receipt can say plainly how much the signature is worth.
+        self._ephemeral_key = not configured
+        self._key = configured or secrets.token_bytes(32)
 
     # ── thresholds ──────────────────────────────────────────────────────
     def set_thresholds(self, path: str, auto_ceiling: float, dual_ceiling: float,
@@ -299,6 +308,53 @@ class GraduatedClearance:
         out["votes"] = [{"approver": a, "decision": d, "at": t} for a, d, t in votes]
         out["approve_count"] = sum(1 for v in out["votes"] if v["decision"] == APPROVE)
         return out
+
+    def verify_votes(self, approval_id: str) -> dict:
+        """Recompute every vote signature and say whether it still holds.
+
+        `_sign_vote` was previously only ever CALLED — nothing in the codebase
+        read the `sig` column back, so a tampered vote row verified as
+        happily as an honest one. (Tickets always did this properly in
+        authority.py; approvals did not.) A signature nobody checks is
+        decoration, and this is the check.
+
+        `ephemeral_key` is reported alongside the result rather than buried:
+        under a process-generated key the signatures cannot mean anything to
+        another replica or after a restart, and a reader deserves to know that
+        before treating a green result as proof of who voted.
+        """
+        with self.seal._connect(autocommit=True) as c:
+            votes = c.execute(
+                "SELECT approver, decision, at, sig FROM seal_approval_votes "
+                "WHERE approval_id=%s ORDER BY at",
+                (approval_id,),
+            ).fetchall()
+
+        checked, bad = [], []
+        for approver, decision, at, sig in votes:
+            expected = self._sign_vote(approval_id, approver, decision, at)
+            ok = hmac.compare_digest(expected, sig or "")
+            checked.append({"approver": approver, "decision": decision,
+                            "at": at, "signature_ok": ok})
+            if not ok:
+                bad.append(approver)
+
+        return {
+            "approval_id": approval_id,
+            "votes": checked,
+            "ok": not bad and bool(votes),
+            "unverified": bad,
+            "ephemeral_key": self._ephemeral_key,
+            "note": (
+                "SEAL_GOV_KEY is not configured, so these signatures were made "
+                "with a per-process key: they cannot be verified by another "
+                "replica or after a restart, and prove nothing about WHO voted."
+                if self._ephemeral_key else
+                "Signatures verified against the configured governance key. "
+                "v0 signs with one shared key, so this proves a vote was minted "
+                "by code holding that key, not by a specific individual."
+            ),
+        }
 
     def consume(self, approval_id: str) -> None:
         """Mark an approval spent. Called once by the gateway at execute() time

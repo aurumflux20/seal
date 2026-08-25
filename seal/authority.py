@@ -297,8 +297,6 @@ class Gateway:
         args_dig = _digest(args)
         t = Ticket(adm.intent, path, adm.fence, args_dig, exp,
                    self._sign(adm.intent, path, adm.fence, args_dig, exp))
-        self._pending = getattr(self, "_pending", {})
-        self._pending[t.sig] = reservation
 
         # MANDATE — minted here, the one moment everything above has already
         # been true: clearance checked, graduated approval satisfied (or not
@@ -315,8 +313,21 @@ class Gateway:
                       if amount is not None and configured and tier != AUTO else None),
             clearance=Clearance(self.seal).status(path)["effective"],
         )
-        self._pending_mandate = getattr(self, "_pending_mandate", {})
-        self._pending_mandate[t.sig] = mandate["mandate_id"]
+
+        # Hand the unfinished work to the STORE, not to this process's memory.
+        # Whichever replica ends up spending this ticket can then settle the
+        # reservation and consume the Mandate — see seal_ticket_pending.
+        with self.seal._connect(autocommit=True) as c:
+            c.execute(
+                "INSERT INTO seal_ticket_pending "
+                "(sig, intent, spend_id, budget_key, amount, mandate_id, created_at) "
+                "VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (sig) DO NOTHING",
+                (t.sig, adm.intent,
+                 reservation.id if reservation is not None else None,
+                 budget_key if reservation is not None else None,
+                 reservation.amount if reservation is not None else None,
+                 mandate["mandate_id"], time.time()),
+            )
 
         return {"status": "cleared", "intent": adm.intent, "ticket": t.to_dict(),
                 "mandate_id": mandate["mandate_id"]}
@@ -354,8 +365,24 @@ class Gateway:
                 "call the provider a second time"
             )
 
-        pending = getattr(self, "_pending", {})
-        reservation = pending.pop(t.sig, None)
+        # Recover what propose() set aside, FROM THE STORE — so this works
+        # when propose() ran on a different replica, or before a restart.
+        # Claimed with DELETE ... RETURNING: whoever removes the row is the
+        # one that finishes the work, and it cannot be picked up twice.
+        with self.seal._connect(autocommit=True) as c:
+            pend = c.execute(
+                "DELETE FROM seal_ticket_pending WHERE sig=%s "
+                "RETURNING spend_id, budget_key, amount, mandate_id",
+                (t.sig,),
+            ).fetchone()
+
+        reservation = None
+        mandate_id = None
+        if pend is not None:
+            spend_id, _budget_key, amount, mandate_id = pend
+            if spend_id is not None:
+                from .budget import Budget, Reservation
+                reservation = Reservation(Budget(self.seal), spend_id, float(amount or 0.0))
 
         # Spend the Mandate in the same breath as the ticket. Consuming it
         # here — after the ticket claim succeeds, before the provider is
@@ -363,8 +390,6 @@ class Gateway:
         # its execution has actually happened, and a replay of this ticket
         # (already refused above by TicketAlreadySpent) can never reach a
         # second mandate.consume() either.
-        pending_mandate = getattr(self, "_pending_mandate", {})
-        mandate_id = pending_mandate.pop(t.sig, None)
         if mandate_id is not None:
             from .mandate import Mandates
             Mandates(self.seal).consume(mandate_id, intent=t.intent, args_digest=t.args_digest)

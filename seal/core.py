@@ -32,6 +32,8 @@ are different claims, and Seal never conflates them.
 """
 from __future__ import annotations
 
+import datetime
+import decimal
 import hashlib
 import json
 import time
@@ -80,8 +82,44 @@ def _jsonb(obj) -> str:
     return json.dumps(_ascii_safe(obj), default=str, ensure_ascii=True)
 
 
+class UnstableDigestInput(TypeError):
+    """A value was handed to _digest() that has no stable serialisation.
+
+    `default=str` used to swallow these. For an object with no custom __str__
+    that means hashing `<Money object at 0x7f...>` — a MEMORY ADDRESS. Two
+    attempts at the same logical action then produce two different intent ids,
+    so content-addressed `admit()` admits both and the effect runs TWICE. The
+    identical hazard applies to `result_digest`, which stops being
+    content-addressed at all.
+
+    A settlement kernel cannot hash something it cannot reproduce, so this is
+    now a loud refusal at the call site instead of a silent double-charge
+    later. Pass a JSON-native value, or an explicit `key=` to intent_id().
+    """
+
+
+# Types whose str() is stable across processes and runs. These already
+# serialised via `default=str`, so keeping them preserves every digest an
+# existing store has already written — the tightening is strictly additive.
+_STABLE_STR_TYPES = (
+    datetime.datetime, datetime.date, datetime.time,
+    decimal.Decimal, uuid.UUID,
+)
+
+
+def _stable_default(o: Any):
+    if isinstance(o, _STABLE_STR_TYPES):
+        return str(o)
+    raise UnstableDigestInput(
+        f"{type(o).__name__} has no stable serialisation, so any hash over it "
+        f"would depend on this process's memory layout. Convert it to a "
+        f"JSON-native value first (or pass an explicit intent key)."
+    )
+
+
 def _digest(obj: Any) -> str:
-    raw = json.dumps(obj, sort_keys=True, separators=(",", ":"), default=str)
+    raw = json.dumps(obj, sort_keys=True, separators=(",", ":"),
+                     default=_stable_default)
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
@@ -286,6 +324,28 @@ CREATE TABLE IF NOT EXISTS seal_tickets (
     spent_at DOUBLE PRECISION NOT NULL
 );
 
+-- What propose() set aside and execute() must finish: the budget reservation
+-- to settle, and the Mandate to consume.
+--
+-- These lived in two in-process dicts on the Gateway (`_pending`,
+-- `_pending_mandate`) — the same defect seal_tickets above was created to fix,
+-- left in the two fields beside it. propose() on one replica and execute() on
+-- another (a load balancer, a rolling deploy, a restart) meant execute() found
+-- nothing to pop: the reservation was never settled and stayed `reserved`
+-- forever, so the budget filled with phantom spend until it refused real
+-- charges; and the Mandate was never consumed, so the receipt for a completed
+-- action still reported it ACTIVE. Not a race — the ordinary path for any
+-- multi-replica gateway.
+CREATE TABLE IF NOT EXISTS seal_ticket_pending (
+    sig        TEXT PRIMARY KEY,
+    intent     TEXT NOT NULL,
+    spend_id   BIGINT,
+    budget_key TEXT,
+    amount     DOUBLE PRECISION,
+    mandate_id TEXT,
+    created_at DOUBLE PRECISION NOT NULL
+);
+
 -- Which paths are under Mandate. An operator-only table: no agent-facing tool
 -- writes to it, for the same reason there is no seal_unfreeze tool — a gate
 -- that could release itself is not a gate.
@@ -335,6 +395,15 @@ CREATE TABLE IF NOT EXISTS seal_tickets (
     intent   TEXT NOT NULL,
     path     TEXT NOT NULL,
     spent_at DOUBLE PRECISION NOT NULL
+);
+CREATE TABLE IF NOT EXISTS seal_ticket_pending (
+    sig        TEXT PRIMARY KEY,
+    intent     TEXT NOT NULL,
+    spend_id   BIGINT,
+    budget_key TEXT,
+    amount     DOUBLE PRECISION,
+    mandate_id TEXT,
+    created_at DOUBLE PRECISION NOT NULL
 );
 CREATE TABLE IF NOT EXISTS seal_mandate_paths (
     path       TEXT PRIMARY KEY,
@@ -461,6 +530,7 @@ class Seal:
         path: str | None = None,
         checker=None,
         _mandate_exempt: bool = False,
+        _retry: int = 0,
     ) -> Admission:
         iid = intent_id(action, args, key)
         args_dig = _digest(args)
@@ -588,8 +658,35 @@ class Seal:
                 (iid,),
             ).fetchone()
             if cur is None:
-                # Raced with a delete — treat as fresh-eligible on one retry.
-                return self.admit(action, args, key, domain, read_set, graph_id)
+                # Raced with a delete (a peer's fail()) — treat as
+                # fresh-eligible on one retry.
+                #
+                # EVERY argument is threaded through. The first version passed
+                # only the first six positionally, silently dropping `path`,
+                # `checker`, `heal_with` and `_mandate_exempt`: a guarded
+                # admission quietly became an unguarded one. Clearance was not
+                # re-checked, the caller's pre-commit freshness check was
+                # skipped on a read_set that was now even staler, the
+                # heal-on-reclaim probe could not run, and the `admitted`
+                # event was never written — so the Range Report under-counted
+                # the very admissions it exists to attest.
+                #
+                # `_retry` is a real counter because the old comment said "on
+                # one retry" and nothing enforced it: a peer deleting the row
+                # in a loop recursed until Python's stack gave out. Failing
+                # closed beats a RecursionError on a money path.
+                if _retry >= 1:
+                    raise SealError(
+                        f"intent {iid[:12]}… kept vanishing between the claim "
+                        "and the read (a peer is deleting it concurrently); "
+                        "refusing to admit rather than retry indefinitely"
+                    )
+                return self.admit(
+                    action, args, key=key, domain=domain, read_set=read_set,
+                    graph_id=graph_id, heal_with=heal_with, path=path,
+                    checker=checker, _mandate_exempt=_mandate_exempt,
+                    _retry=_retry + 1,
+                )
 
             state, cert, lease_until, _held_fence, stored_args = cur
 
@@ -746,7 +843,17 @@ class Seal:
             "SELECT hash FROM seal_certs ORDER BY seq DESC LIMIT 1"
         ).fetchone()
         prev_hash = prev[0] if prev else GENESIS
-        body = {**body, "prev_hash": prev_hash}
+        # NORMALISE BEFORE HASHING. _jsonb() strips non-ASCII on the way into
+        # JSONB (see _ascii_safe), so hashing the raw body meant hashing bytes
+        # the store would never hand back: verify_chain() recomputed from the
+        # stripped row, got a different digest, and reported "cert altered
+        # since written" on a chain nobody had touched. One accented character
+        # anywhere in a witness's evidence -- a German decline message, a
+        # customer name -- permanently marked an honest chain as tampered, and
+        # because the chain is append-only by design it could never be undone.
+        # Hashing the normalised body closes the gap: what we hash is exactly
+        # what we store and exactly what an auditor reads back.
+        body = _ascii_safe({**body, "prev_hash": prev_hash})
         cert_hash = _digest(body)
         cert = {**body, "hash": cert_hash}
         c.execute(
