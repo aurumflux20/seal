@@ -1,0 +1,23 @@
+# Publishes server.json to the official MCP Registry via GitHub OIDC —
+# no stored token; the io.github.aurumflux20/* namespace is proven by
+# this workflow running in this repo. Requires the PyPI README to carry
+# the `mcp-name:` line (ownership proof for the pypi package entry).
+name: Publish to MCP Registry
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install mcp-publisher
+        run: |
+          curl -sL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m).tar.gz" | tar xz mcp-publisher
+      - run: ./mcp-publisher login github-oidc
+      - run: ./mcp-publisher publish
