@@ -294,6 +294,91 @@ $250,000 is never automatic; and one `revoke` stops even the $200 path. It
 ends on the Range Report, which states approvals in money — approved and
 rejected totals — rather than a count of event kinds.
 
+## Portable receipts — evidence that leaves the building
+
+The dispute that matters spans three parties — the user who authorised an
+agent, the operator who ran it, and the merchant who got paid — and each holds
+a database the other two cannot read. `seal verify` answers "did this run
+exactly once, and did the world confirm it?", but only to someone holding the
+DSN, which is to say only to the party being asked to prove its own innocence.
+
+A portable receipt is that answer as a file. Certs are hashed over
+**RFC 8785 canonical JSON** and (with a key configured) **Ed25519-signed** at
+write time, so a counterparty verifies them with *no database, no network, and
+none of our code* — [`docs/verify-receipt.mjs`](docs/verify-receipt.mjs) does
+it in ~30 lines of Node:
+
+```bash
+pip install 'seal-kernel[signing]'
+python -m seal keygen                     # SEAL_SIGNING_KEY= secret · public key= publish it
+python -m seal export --intent <id> > receipt.json
+python -m seal verify-receipt receipt.json --pubkey <hex>    # needs NO DSN
+node docs/verify-receipt.mjs receipt.json <hex>              # or no Python at all
+```
+
+Honest limits, on the verdict itself: a pinned-key pass proves *these certs
+were produced by the key holder and are unaltered* — it cannot prove
+completeness (whether other certs exist takes the chain check against the
+store), and an unpinned pass proves internal consistency only, never
+authorship. Signing is opt-in; an unsigned store keeps working exactly as
+before, and v1 certs keep verifying next to v2 forever.
+
+## settle() — deduplication is not settlement
+
+Idempotency keys make retrying the *same request* safe. They do not answer
+what happened after a timeout where the provider may already have acted. That
+intent sits `open`, and before `settle()` the only resolution was implicit — a
+future `admit(heal_with=…)` some caller might never make. Now it is one verb:
+
+```python
+gateway.settle(intent)      # uses the path's registered witness
+# CONFIRMED_ONE → healed to WORLD_FINAL, budget reservation settled
+# ABSENT        → claim released for a clean retry, budget returned
+# MULTIPLE      → WORLD_DIVERGED on the chain, domain frozen
+# UNKNOWN       → unresolved, loudly — the claim stands, nothing is guessed
+```
+
+## Obligations — the alarm for what an agent FAILS to do
+
+Every guard above — and every agent-safety tool we know of — watches
+*commission*: the double-charge, the overspend, the contradiction. Nothing
+watches *omission*. An agent that crashed, lost its key, or silently stopped
+looks exactly like an agent with nothing to do — until payroll doesn't go
+out, or the refund that was legally due in 14 days quietly doesn't happen.
+
+This repo already refuses that failure mode for its tests (`conftest.py`: a
+run where everything skipped is not a pass). Obligations apply the same
+sentence to production money. It is the dual of the reconcile sweep:
+
+```
+reconcile:    provider effects − admitted intents = out-of-band  (did too much)
+obligations:  declared duties  − sealed intents   = BREACH       (did too little)
+```
+
+```python
+from seal.obligation import Obligations
+obs = Obligations(seal); obs.setup()
+
+# at decision time, the agent binds its future self:
+obs.expect(action="refund", key="return-123", due_in_sec=14*86400,
+           description="statutory refund window for return #123")
+
+# the business heartbeat:
+obs.expect_recurring(action="renewal", every_sec=86400, min_count=1)
+
+obs.sweep()   # or: python -m seal obligations   (exit 1 on any open breach)
+```
+
+What makes a miss more than a dashboard row: **the breach itself is appended
+to the tamper-evident chain** (deleting it breaks every hash after it), and
+`obligation_breached` is a **licence-suspending event** — a path that goes
+silent on declared work loses its earned autonomy exactly like a path that
+double-charged. Declaring duties is open to agents (`seal_expect` over MCP);
+cancelling one is an operator act with no agent-facing tool, because an
+obligation an agent could cancel is not an obligation. A breach deliberately
+does *not* freeze the path — a frozen refund path cannot cure a missed
+refund; the levers are evidence, alarm, and the licence.
+
 ## What a Seal cert does and does not claim
 
 A cert proves the action was **admitted exactly once at this gateway** and that

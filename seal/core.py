@@ -32,14 +32,19 @@ are different claims, and Seal never conflates them.
 """
 from __future__ import annotations
 
+import datetime
+import decimal
 import hashlib
 import json
+import os
 import time
 import uuid
 from dataclasses import dataclass
 from typing import Any, Optional
 
 import psycopg
+
+from .canonical import jcs_digest
 
 
 # ── canonical hashing ─────────────────────────────────────────────────────
@@ -80,8 +85,44 @@ def _jsonb(obj) -> str:
     return json.dumps(_ascii_safe(obj), default=str, ensure_ascii=True)
 
 
+class UnstableDigestInput(TypeError):
+    """A value was handed to _digest() that has no stable serialisation.
+
+    `default=str` used to swallow these. For an object with no custom __str__
+    that means hashing `<Money object at 0x7f...>` — a MEMORY ADDRESS. Two
+    attempts at the same logical action then produce two different intent ids,
+    so content-addressed `admit()` admits both and the effect runs TWICE. The
+    identical hazard applies to `result_digest`, which stops being
+    content-addressed at all.
+
+    A settlement kernel cannot hash something it cannot reproduce, so this is
+    now a loud refusal at the call site instead of a silent double-charge
+    later. Pass a JSON-native value, or an explicit `key=` to intent_id().
+    """
+
+
+# Types whose str() is stable across processes and runs. These already
+# serialised via `default=str`, so keeping them preserves every digest an
+# existing store has already written — the tightening is strictly additive.
+_STABLE_STR_TYPES = (
+    datetime.datetime, datetime.date, datetime.time,
+    decimal.Decimal, uuid.UUID,
+)
+
+
+def _stable_default(o: Any):
+    if isinstance(o, _STABLE_STR_TYPES):
+        return str(o)
+    raise UnstableDigestInput(
+        f"{type(o).__name__} has no stable serialisation, so any hash over it "
+        f"would depend on this process's memory layout. Convert it to a "
+        f"JSON-native value first (or pass an explicit intent key)."
+    )
+
+
 def _digest(obj: Any) -> str:
-    raw = json.dumps(obj, sort_keys=True, separators=(",", ":"), default=str)
+    raw = json.dumps(obj, sort_keys=True, separators=(",", ":"),
+                     default=_stable_default)
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
@@ -286,6 +327,28 @@ CREATE TABLE IF NOT EXISTS seal_tickets (
     spent_at DOUBLE PRECISION NOT NULL
 );
 
+-- What propose() set aside and execute() must finish: the budget reservation
+-- to settle, and the Mandate to consume.
+--
+-- These lived in two in-process dicts on the Gateway (`_pending`,
+-- `_pending_mandate`) — the same defect seal_tickets above was created to fix,
+-- left in the two fields beside it. propose() on one replica and execute() on
+-- another (a load balancer, a rolling deploy, a restart) meant execute() found
+-- nothing to pop: the reservation was never settled and stayed `reserved`
+-- forever, so the budget filled with phantom spend until it refused real
+-- charges; and the Mandate was never consumed, so the receipt for a completed
+-- action still reported it ACTIVE. Not a race — the ordinary path for any
+-- multi-replica gateway.
+CREATE TABLE IF NOT EXISTS seal_ticket_pending (
+    sig        TEXT PRIMARY KEY,
+    intent     TEXT NOT NULL,
+    spend_id   BIGINT,
+    budget_key TEXT,
+    amount     DOUBLE PRECISION,
+    mandate_id TEXT,
+    created_at DOUBLE PRECISION NOT NULL
+);
+
 -- Which paths are under Mandate. An operator-only table: no agent-facing tool
 -- writes to it, for the same reason there is no seal_unfreeze tool — a gate
 -- that could release itself is not a gate.
@@ -336,6 +399,15 @@ CREATE TABLE IF NOT EXISTS seal_tickets (
     path     TEXT NOT NULL,
     spent_at DOUBLE PRECISION NOT NULL
 );
+CREATE TABLE IF NOT EXISTS seal_ticket_pending (
+    sig        TEXT PRIMARY KEY,
+    intent     TEXT NOT NULL,
+    spend_id   BIGINT,
+    budget_key TEXT,
+    amount     DOUBLE PRECISION,
+    mandate_id TEXT,
+    created_at DOUBLE PRECISION NOT NULL
+);
 CREATE TABLE IF NOT EXISTS seal_mandate_paths (
     path       TEXT PRIMARY KEY,
     required   BOOLEAN NOT NULL,
@@ -367,10 +439,69 @@ class Seal:
     # certs. Safety held (one execution, everyone else failed safe), but a
     # settlement rail that cannot record an effect under load is not shippable.
     # 24 tries with capped backoff covers the observed saturation window.
-    def __init__(self, dsn: str, lease_sec: float = 30.0, connect_tries: int = 24):
+    def __init__(self, dsn: str, lease_sec: float = 30.0, connect_tries: int = 24,
+                 signing_key: str | None = None):
         self.dsn = dsn
         self.lease_sec = lease_sec
         self._connect_tries = connect_tries
+        # Optional Ed25519 signing of every cert. `signing_key` (or the
+        # SEAL_SIGNING_KEY env var) is either a 64-char hex seed or a path to
+        # a PEM private key. Unset means certs stay hash-chained but unsigned
+        # — verifiable by anyone with the store, provable to nobody outside it.
+        self._signing_key = signing_key
+        self._signer_loaded = False
+        self._signer: tuple | None = None
+
+    def _load_signer(self):
+        """(private_key, public_key_hex) or None. FAILS LOUDLY on misconfig.
+
+        A configured signing key that silently produced unsigned certs would
+        be the decorative-signature defect all over again — an operator who
+        set SEAL_SIGNING_KEY believes their receipts are provable, and finding
+        out otherwise during a dispute is the worst possible moment. So a set
+        key with a missing crypto library or an unreadable value raises here,
+        at the first seal, not at audit time.
+        """
+        if self._signer_loaded:
+            return self._signer
+        src = self._signing_key or os.environ.get("SEAL_SIGNING_KEY", "")
+        if not src:
+            self._signer = None
+        else:
+            try:
+                from cryptography.hazmat.primitives import serialization
+                from cryptography.hazmat.primitives.asymmetric.ed25519 import (
+                    Ed25519PrivateKey,
+                )
+            except ImportError as e:
+                raise SealError(
+                    "SEAL_SIGNING_KEY is set but the 'cryptography' package is "
+                    "not installed — pip install 'seal-kernel[signing]'. "
+                    "Refusing to write certs the operator believes are signed."
+                ) from e
+            if os.path.isfile(src):
+                with open(src, "rb") as f:
+                    key = serialization.load_pem_private_key(f.read(), password=None)
+                if not isinstance(key, Ed25519PrivateKey):
+                    raise SealError("SEAL_SIGNING_KEY PEM is not an Ed25519 key")
+            else:
+                try:
+                    seed = bytes.fromhex(src.strip())
+                except ValueError as e:
+                    raise SealError(
+                        "SEAL_SIGNING_KEY is neither an existing PEM file nor "
+                        "a hex seed"
+                    ) from e
+                key = Ed25519PrivateKey.from_private_bytes(seed)
+            self._signer = (key, key.public_key().public_bytes_raw().hex())
+        self._signer_loaded = True
+        return self._signer
+
+    @property
+    def signer_public_key(self) -> str | None:
+        """Hex of the raw Ed25519 public key certs are signed with, if any."""
+        s = self._load_signer()
+        return s[1] if s else None
 
     def _connect(self, *, autocommit: bool):
         # Pin the client encoding to UTF-8 explicitly. A store created under a
@@ -461,6 +592,7 @@ class Seal:
         path: str | None = None,
         checker=None,
         _mandate_exempt: bool = False,
+        _retry: int = 0,
     ) -> Admission:
         iid = intent_id(action, args, key)
         args_dig = _digest(args)
@@ -588,8 +720,35 @@ class Seal:
                 (iid,),
             ).fetchone()
             if cur is None:
-                # Raced with a delete — treat as fresh-eligible on one retry.
-                return self.admit(action, args, key, domain, read_set, graph_id)
+                # Raced with a delete (a peer's fail()) — treat as
+                # fresh-eligible on one retry.
+                #
+                # EVERY argument is threaded through. The first version passed
+                # only the first six positionally, silently dropping `path`,
+                # `checker`, `heal_with` and `_mandate_exempt`: a guarded
+                # admission quietly became an unguarded one. Clearance was not
+                # re-checked, the caller's pre-commit freshness check was
+                # skipped on a read_set that was now even staler, the
+                # heal-on-reclaim probe could not run, and the `admitted`
+                # event was never written — so the Range Report under-counted
+                # the very admissions it exists to attest.
+                #
+                # `_retry` is a real counter because the old comment said "on
+                # one retry" and nothing enforced it: a peer deleting the row
+                # in a loop recursed until Python's stack gave out. Failing
+                # closed beats a RecursionError on a money path.
+                if _retry >= 1:
+                    raise SealError(
+                        f"intent {iid[:12]}… kept vanishing between the claim "
+                        "and the read (a peer is deleting it concurrently); "
+                        "refusing to admit rather than retry indefinitely"
+                    )
+                return self.admit(
+                    action, args, key=key, domain=domain, read_set=read_set,
+                    graph_id=graph_id, heal_with=heal_with, path=path,
+                    checker=checker, _mandate_exempt=_mandate_exempt,
+                    _retry=_retry + 1,
+                )
 
             state, cert, lease_until, _held_fence, stored_args = cur
 
@@ -746,9 +905,38 @@ class Seal:
             "SELECT hash FROM seal_certs ORDER BY seq DESC LIMIT 1"
         ).fetchone()
         prev_hash = prev[0] if prev else GENESIS
-        body = {**body, "prev_hash": prev_hash}
-        cert_hash = _digest(body)
+        # NORMALISE BEFORE HASHING. _jsonb() strips non-ASCII on the way into
+        # JSONB (see _ascii_safe), so hashing the raw body meant hashing bytes
+        # the store would never hand back: verify_chain() recomputed from the
+        # stripped row, got a different digest, and reported "cert altered
+        # since written" on a chain nobody had touched. One accented character
+        # anywhere in a witness's evidence -- a German decline message, a
+        # customer name -- permanently marked an honest chain as tampered, and
+        # because the chain is append-only by design it could never be undone.
+        # Hashing the normalised body closes the gap: what we hash is exactly
+        # what we store and exactly what an auditor reads back.
+        #
+        # CERT v2 (`cv: 2`) — the portable-receipt format:
+        #   * hashed over RFC 8785 canonical bytes (see canonical.py), so a
+        #     verifier in ANY language recomputes the same digest from the
+        #     receipt alone — no Python, no our-code, no DSN;
+        #   * optionally Ed25519-SIGNED: `signer` (raw public key, hex) is
+        #     inside the hashed body, binding identity into the digest, and
+        #     `sig` (over the hash bytes) sits outside it. A hash chain proves
+        #     the store is internally consistent; only a signature proves to a
+        #     third party WHO wrote the cert. Disputes happen across trust
+        #     boundaries, and this is the field that crosses them.
+        # v1 certs already in the store keep verifying under the legacy digest
+        # — verify_chain() dispatches per cert, so upgrading never breaks an
+        # existing chain.
+        body = _ascii_safe({**body, "prev_hash": prev_hash, "cv": 2})
+        signer = self._load_signer()
+        if signer is not None:
+            body["signer"] = signer[1]
+        cert_hash = jcs_digest(body)
         cert = {**body, "hash": cert_hash}
+        if signer is not None:
+            cert["sig"] = signer[0].sign(bytes.fromhex(cert_hash)).hex()
         c.execute(
             "INSERT INTO seal_certs (intent, hash, prev_hash, body, created_at) "
             "VALUES (%s,%s,%s,%s,%s)",
@@ -916,6 +1104,170 @@ class Seal:
             )
         return cert
 
+    # ── settle: drive an ambiguous outcome to a terminal state ────────────
+    def settle(self, intent: str, witness) -> dict:
+        """Resolve an intent whose outcome is unknown — by asking the world.
+
+        The gap this closes: after an AmbiguousOutcome (timeout / 5xx / dropped
+        connection AFTER the provider was called), the intent sits `open` with
+        its claim standing. `witness()` refuses open intents, and until now
+        the only resolution was implicit — a *future* admit(heal_with=…) from
+        some later caller, which nobody may ever make. Deduplication is not
+        settlement: the runtime has to be able to establish what happened
+        externally, on demand, before any retry. This is that operation.
+
+            probe = CONFIRMED_ONE → HEAL. The effect exists exactly once; seal
+                    it as WORLD_FINAL without re-executing. Reserved budget
+                    rows become settled spend.
+            probe = ABSENT        → RELEASE. The provider authoritatively says
+                    nothing happened; the claim is deleted so a retry may
+                    re-admit fresh, and reserved budget rows are returned.
+            probe = MULTIPLE      → DIVERGED. The world holds ≥2 effects for
+                    an intent we never even sealed once — a contradiction.
+                    Recorded on the chain, the domain frozen.
+            probe = UNKNOWN       → UNRESOLVED, loudly. The claim stands.
+                    Guessing here is the double-charge; refusing to guess is
+                    the product.
+
+        Two refusals, stated up front:
+        * A claim whose lease is still alive is NOT settled — the holder may
+          be mid-effect, and racing it is how one intent gets two outcomes.
+        * ABSENT is trusted exactly as far as witness.py's contract: only an
+          authoritative "no such effect" may answer ABSENT. An eventually-
+          consistent index that answers "no results yet" as ABSENT is a
+          misconfigured witness, and no settle logic can save it.
+
+        A sealed intent is delegated to witness() — settle() is then just the
+        one verb that always moves an intent toward a terminal, world-checked
+        state, whatever state it starts in.
+        """
+        from .witness import ABSENT, CONFIRMED_ONE, MULTIPLE
+
+        rec = self.get(intent)
+        if rec is None:
+            raise SealError(f"unknown intent {intent[:12]}…")
+
+        if rec["state"] == "sealed":
+            cert = self.witness(intent, witness)
+            return {"resolution": "witnessed", "tier": cert["tier"], "cert": cert}
+        if rec["state"] != "open":
+            raise SealError(
+                f"intent {intent[:12]}… is {rec['state']!r} — settle() resolves "
+                "open (ambiguous) or sealed intents"
+            )
+
+        now = time.time()
+        with self._connect(autocommit=True) as c:
+            row = c.execute(
+                "SELECT lease_until FROM seal_intents WHERE intent=%s AND state='open'",
+                (intent,),
+            ).fetchone()
+        if row is None:
+            # Sealed or released underneath us — re-read and go again.
+            return self.settle(intent, witness)
+        if row[0] >= now:
+            raise SealError(
+                f"intent {intent[:12]}…'s holder is still within its lease — "
+                "the effect may be mid-flight; settle() only resolves "
+                "abandoned claims"
+            )
+
+        probe = witness.look(rec)
+
+        if probe.state == CONFIRMED_ONE:
+            cert = self._heal(intent, probe)
+            self._settle_budget_rows(intent, keep=True)
+            return {"resolution": "healed", "tier": TIER_WORLD_FINAL,
+                    "cert": cert}
+
+        if probe.state == ABSENT:
+            with self._connect(autocommit=True) as c:
+                gone = c.execute(
+                    "DELETE FROM seal_intents "
+                    "WHERE intent=%s AND state='open' AND lease_until < %s "
+                    "RETURNING intent",
+                    (intent, time.time()),
+                ).fetchone()
+            if gone is None:
+                # The claim changed between the probe and the delete.
+                return {"resolution": "unresolved",
+                        "reason": "claim changed underneath the probe — settle again"}
+            self._settle_budget_rows(intent, keep=False)
+            self.record_event("settled_released", intent=intent,
+                              detail={"witness_evidence": probe.evidence})
+            return {"resolution": "released",
+                    "note": "provider authoritatively reports no effect; the "
+                            "intent may be admitted fresh"}
+
+        if probe.state == MULTIPLE:
+            with self._connect(autocommit=True) as c:
+                with c.transaction():
+                    held = c.execute(
+                        "SELECT action, args_digest FROM seal_intents "
+                        "WHERE intent=%s FOR UPDATE",
+                        (intent,),
+                    ).fetchone()
+                    body = {
+                        "intent": intent,
+                        "action": held[0],
+                        "args_digest": held[1],
+                        "tier": TIER_WORLD_DIVERGED,
+                        "world": _TIER_TO_WORLD[TIER_WORLD_DIVERGED],
+                        "settled": True,
+                        "witness_state": probe.state,
+                        "witness_count": probe.count,
+                        "witness_evidence": probe.evidence,
+                        "at": now,
+                    }
+                    cert = self._append_cert(c, body)
+                    c.execute(
+                        "UPDATE seal_intents SET state='sealed', cert=%s, "
+                        "tier=%s, updated_at=%s WHERE intent=%s",
+                        (_jsonb(cert), TIER_WORLD_DIVERGED, now, intent),
+                    )
+            # Money moved (more than once); the reservations are real spend.
+            self._settle_budget_rows(intent, keep=True)
+            if rec["domain"]:
+                self.freeze_domain(
+                    rec["domain"],
+                    f"settle() found {probe.count} effects for intent "
+                    f"{intent[:12]}… that was never sealed",
+                    evidence=probe.evidence,
+                )
+            self.record_event("diverged", intent=intent,
+                              detail={"count": probe.count, "via": "settle"})
+            return {"resolution": "diverged", "tier": TIER_WORLD_DIVERGED,
+                    "cert": cert}
+
+        # UNKNOWN — the honest non-answer. Nothing changes; say so on the log.
+        self.record_event("settle_unknown", intent=intent,
+                          detail={"evidence": probe.evidence})
+        return {"resolution": "unresolved",
+                "reason": "witness could not determine the outcome; the claim "
+                          "stands — try again, or escalate to a human"}
+
+    def _settle_budget_rows(self, intent: str, keep: bool) -> None:
+        """Resolve budget reservations tied to an intent settle() just decided.
+
+        keep=True — the money moved: reservations become settled spend.
+        keep=False — it did not: the headroom is returned. Tolerates a store
+        with no budget tables; not every deployment configures Budget.
+        """
+        with self._connect(autocommit=True) as c:
+            if c.execute("SELECT to_regclass('seal_spend')").fetchone()[0] is None:
+                return
+            if keep:
+                c.execute(
+                    "UPDATE seal_spend SET state='settled' "
+                    "WHERE intent=%s AND state='reserved'",
+                    (intent,),
+                )
+            else:
+                c.execute(
+                    "DELETE FROM seal_spend WHERE intent=%s AND state='reserved'",
+                    (intent,),
+                )
+
     # ── B8 · incident receipt ─────────────────────────────────────────────
     def incident_receipt(self, intent: str) -> dict:
         """Everything an auditor needs about one intent, in one exportable blob.
@@ -954,14 +1306,29 @@ class Seal:
                 "SELECT seq, hash, prev_hash, body FROM seal_certs ORDER BY seq ASC"
             ).fetchall()
         prev = GENESIS
+        signed = 0
         for i, (seq, h, ph, body) in enumerate(rows):
             if ph != prev:
                 return {"ok": False, "at": i, "why": "chain link broken"}
-            # Hash covers every field except the hash itself. Deriving the set
-            # from the body (rather than a hardcoded tuple) means adding a cert
-            # field can never silently drop it out of the tamper check.
-            recomputed = _digest({k: v for k, v in body.items() if k != "hash"})
+            # Hash covers every field except the hash itself (and, for v2, the
+            # signature — which is computed OVER the hash and so cannot be
+            # under it). Deriving the set from the body rather than a
+            # hardcoded tuple means adding a cert field can never silently
+            # drop it out of the tamper check. Dispatch per cert version so a
+            # chain that spans an upgrade keeps verifying end to end.
+            if body.get("cv") == 2:
+                recomputed = jcs_digest(
+                    {k: v for k, v in body.items() if k not in ("hash", "sig")}
+                )
+            else:
+                recomputed = _digest({k: v for k, v in body.items() if k != "hash"})
             if recomputed != h or body.get("hash") != h:
                 return {"ok": False, "at": i, "why": "cert altered since written"}
+            if body.get("sig"):
+                signed += 1
             prev = h
-        return {"ok": True, "certs": len(rows)}
+        # `signed` counts certs carrying a signature; verifying those
+        # signatures against a PINNED key is verify_receipt()'s job — checking
+        # them against the key embedded in the cert itself would only prove
+        # the cert agrees with itself, which the hash already does.
+        return {"ok": True, "certs": len(rows), "signed": signed}

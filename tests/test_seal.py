@@ -129,7 +129,7 @@ def _sealed(seal: Seal, n: int):
 
 def test_chain_verifies_clean(seal: Seal):
     _sealed(seal, 3)
-    assert seal.verify_chain() == {"ok": True, "certs": 3}
+    assert seal.verify_chain() == {"ok": True, "certs": 3, "signed": 0}
 
 
 def test_edited_cert_breaks_chain(seal: Seal):

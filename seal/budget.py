@@ -149,6 +149,83 @@ class Budget:
             return 0.0
         return max(0.0, float(row[0]) - self.spent(budget_key))
 
+    def reconcile_reservations(self, budget_key: str | None = None,
+                               apply: bool = False) -> dict:
+        """Resolve reservations whose worker never came back.
+
+        A process that dies between `reserve()` and `settle()`/`release()`
+        leaves a `reserved` row, and `spent()` counts it for the whole window —
+        so every crash permanently narrows the ceiling until it ages out. On a
+        30-day window that is 30 days of headroom lost per crash.
+
+        The resolution is driven by the intent's own state, never by a guess,
+        because the dangerous mistake here is releasing budget for money that
+        actually moved:
+
+            intent sealed        -> SETTLE. The effect is on the chain.
+            intent gone          -> RELEASE. fail() deletes the row only when
+                                    nothing irreversible happened.
+            open, lease alive    -> leave it. Still in flight.
+            open, lease expired  -> leave it, and REPORT it. The holder died
+                                    mid-effect; only a witness can say whether
+                                    the money moved, and guessing either way is
+                                    the double-charge this library exists to
+                                    stop.
+
+        Reports by default. Pass `apply=True` to act.
+        """
+        where = "WHERE s.state='reserved'"
+        params: list = []
+        if budget_key is not None:
+            where += " AND s.budget_key=%s"
+            params.append(budget_key)
+
+        now = time.time()
+        settle, release, in_flight, needs_witness = [], [], [], []
+        with self.seal._connect(autocommit=True) as c:
+            rows = c.execute(
+                f"SELECT s.id, s.budget_key, s.amount, s.intent, i.state, i.lease_until "
+                f"FROM seal_spend s LEFT JOIN seal_intents i ON i.intent = s.intent "
+                f"{where}",
+                tuple(params),
+            ).fetchall()
+
+            for sid, bkey, amount, intent, istate, lease in rows:
+                entry = {"spend_id": sid, "budget_key": bkey,
+                         "amount": float(amount), "intent": intent}
+                if intent is None:
+                    in_flight.append(entry)          # not tied to an intent
+                elif istate == "sealed":
+                    settle.append(entry)
+                elif istate is None:
+                    release.append(entry)
+                elif istate == "open" and lease is not None and lease < now:
+                    needs_witness.append(entry)
+                else:
+                    in_flight.append(entry)
+
+            if apply:
+                if settle:
+                    c.execute("UPDATE seal_spend SET state='settled' WHERE id = ANY(%s)",
+                              ([e["spend_id"] for e in settle],))
+                if release:
+                    c.execute("DELETE FROM seal_spend WHERE state='reserved' AND id = ANY(%s)",
+                              ([e["spend_id"] for e in release],))
+
+        return {
+            "applied": apply,
+            "settled": settle,
+            "released": release,
+            "in_flight": in_flight,
+            "needs_witness": needs_witness,
+            "note": (
+                "`needs_witness` reservations are NOT resolved automatically: "
+                "the holder died mid-effect, and only the provider can say "
+                "whether the money moved. Witness the intent, then settle or "
+                "release deliberately."
+            ),
+        }
+
     def reserve(self, budget_key: str, amount: float, intent: str | None = None) -> Reservation:
         """Take headroom BEFORE the effect, atomically across processes.
 

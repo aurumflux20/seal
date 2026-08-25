@@ -32,7 +32,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - run: pip install -e . pytest
+      - run: pip install -e .[signing] pytest
       - name: unit + attack suite
         run: python -m pytest tests/ -q
       - name: end-to-end demos (exactly-once · divergence freeze · compensation)

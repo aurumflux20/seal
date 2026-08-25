@@ -44,6 +44,14 @@ OUT_OF_BAND = "out_of_band"    # provider answered, effects exist we never admit
 UNKNOWN = "unknown"            # we could not enumerate — NOT the same as clean
 
 
+class ProviderEnumerationIncomplete(Exception):
+    """The provider has more effects than we could page through.
+
+    Raised, never swallowed, so `sweep()` reports UNKNOWN. A partial
+    enumeration reported as CLEAN is worse than no answer at all.
+    """
+
+
 @dataclass(frozen=True)
 class ProviderEffect:
     """One thing the provider says it actually did.
@@ -96,23 +104,58 @@ class StripeLister:
         self._transport = transport
         self._metadata_key = metadata_key
 
+    # A window with more effects than this is not enumerated — and an
+    # un-enumerated window must RAISE, never return a short list. 100 pages of
+    # 100 is 10,000 effects; past that the honest answer is "ask for a
+    # narrower window", not a partial one.
+    MAX_PAGES = 100
+
     def list_effects(self, since: float, until: float) -> Iterable[ProviderEffect]:
         # Deliberately no try/except: a failure must propagate so the sweep
         # reports UNKNOWN rather than an empty (= "clean") result.
+        #
+        # PAGINATION IS NOT OPTIONAL HERE. Stripe caps a page at 100 and sets
+        # `has_more`. The first version issued ONE request and ignored
+        # `has_more`, so an account with 101 effects in the window had the
+        # 101st silently disappear — and since the rogue charge is exactly
+        # what sorts onto a later page, the sweep returned CLEAN while looking
+        # at none of the evidence. That is the "reports a breach as a clean
+        # bill of health" failure this module's docstring forbids, arrived at
+        # by truncation instead of by collapsing UNKNOWN.
         out: list[ProviderEffect] = []
-        params = {"created[gte]": int(since), "created[lte]": int(until), "limit": 100}
-        body = self._transport("/v1/payment_intents", params)
-        for d in (body.get("data") or []):
-            if d.get("status") not in ("succeeded", "processing"):
-                continue          # existed but settled nothing — not spend
-            out.append(ProviderEffect(
-                id=d.get("id", ""),
-                amount=d.get("amount"),
-                created_at=d.get("created"),
-                intent_tag=(d.get("metadata") or {}).get(self._metadata_key),
-                raw={"status": d.get("status")},
-            ))
-        return out
+        starting_after: str | None = None
+        for _ in range(self.MAX_PAGES):
+            params: dict = {"created[gte]": int(since), "created[lte]": int(until),
+                            "limit": 100}
+            if starting_after is not None:
+                params["starting_after"] = starting_after
+            body = self._transport("/v1/payment_intents", params)
+            data = body.get("data") or []
+            for d in data:
+                if d.get("status") not in ("succeeded", "processing"):
+                    continue      # existed but settled nothing — not spend
+                out.append(ProviderEffect(
+                    id=d.get("id", ""),
+                    amount=d.get("amount"),
+                    created_at=d.get("created"),
+                    intent_tag=(d.get("metadata") or {}).get(self._metadata_key),
+                    raw={"status": d.get("status")},
+                ))
+            if not body.get("has_more"):
+                return out
+            # The cursor must be the last RAW object, not the last one we
+            # kept: paging from a filtered id would skip everything between.
+            cursor = data[-1].get("id") if data else None
+            if not cursor:
+                raise ProviderEnumerationIncomplete(
+                    "provider reported has_more but returned no cursor — the "
+                    "window cannot be fully enumerated"
+                )
+            starting_after = cursor
+        raise ProviderEnumerationIncomplete(
+            f"window still had more effects after {self.MAX_PAGES} pages; "
+            "narrow `since`/`until` rather than accept a partial sweep"
+        )
 
 
 class Reconciler:
