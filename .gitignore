@@ -3,3 +3,9 @@ __pycache__/
 *.egg-info/
 *.pyc
 # stripe_demo needs a key at runtime; never commit keys
+
+# Internal GTM / sales strategy — deliberately not published to the public repo.
+# (Publishing a lead-gen target list and soft-sell templates would undercut the
+# goodwill that makes the public-bug-report channel work.) Delivered to the
+# owner directly instead.
+gtm/
