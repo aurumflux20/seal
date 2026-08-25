@@ -19,23 +19,26 @@ jobs:
       - name: Install mcp-publisher
         run: |
           set -euo pipefail
-          # Release assets are named mcp-publisher_<version>_<os>_<goarch>.tar.gz.
-          # The first cut of this workflow used `uname -m` (x86_64) where Go
-          # names it amd64, and dropped the version entirely — so the URL 404'd
-          # and an HTML error page got piped into tar ("not in gzip format").
-          # Resolve the real version and map the arch; `curl -f` fails loudly on
-          # a bad URL instead of silently handing garbage to tar.
-          VERSION="$(curl -fsSL https://api.github.com/repos/modelcontextprotocol/registry/releases/latest \
-            | grep -oP '"tag_name":\s*"v?\K[^"]+')"
-          OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
-          case "$(uname -m)" in
-            x86_64)         ARCH=amd64 ;;
-            aarch64|arm64)  ARCH=arm64 ;;
-            *) echo "unsupported arch $(uname -m)"; exit 1 ;;
-          esac
-          URL="https://github.com/modelcontextprotocol/registry/releases/download/v${VERSION}/mcp-publisher_${VERSION}_${OS}_${ARCH}.tar.gz"
+          # DISCOVER the asset URL; never construct it. Two earlier cuts of this
+          # step guessed the filename (`uname -m` where Go says amd64, then a
+          # version-stamped name) and both 404'd — the second silently piping an
+          # error page into tar. The release JSON already carries the exact
+          # download URL, so ask for it and match on the asset name instead.
+          curl -fsSL -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            https://api.github.com/repos/modelcontextprotocol/registry/releases/latest > release.json
+          URL="$(jq -r '.assets[].browser_download_url
+                        | select(test("(?i)(linux).*(amd64|x86[-_]64).*\\.tar\\.gz$"))' release.json | head -1)"
+          if [ -z "$URL" ]; then
+            echo "No linux/amd64 tarball in the latest release. Assets present:"
+            jq -r '.assets[].name' release.json
+            exit 1
+          fi
           echo "Downloading $URL"
-          curl -fSL "$URL" | tar xz mcp-publisher
+          curl -fSL "$URL" -o publisher.tar.gz
+          tar xzf publisher.tar.gz mcp-publisher
+          chmod +x mcp-publisher
           ./mcp-publisher --version
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
       - run: ./mcp-publisher login github-oidc
       - run: ./mcp-publisher publish
