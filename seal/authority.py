@@ -424,3 +424,21 @@ class Gateway:
             reservation.settle()
         cert = self.seal.seal(t.intent, t.fence, result)
         return {"status": "executed", "intent": t.intent, "result": result, "cert": cert}
+
+    def settle(self, intent: str) -> dict:
+        """Resolve an ambiguous outcome using this path's registered witness.
+
+        The operational answer to AmbiguousOutcome: the same gateway that
+        refused to guess now asks the provider what actually happened, and
+        heals, releases, or freezes accordingly — see Seal.settle().
+        """
+        rec = self.seal.get(intent)
+        if rec is None:
+            raise SealError(f"unknown intent {intent[:12]}…")
+        w = self._witnesses.get(rec["action"])
+        if w is None:
+            raise SealError(
+                f"no witness registered for path {rec['action']!r} — "
+                "register_witness() first; settling without one would be a guess"
+            )
+        return self.seal.settle(intent, w)

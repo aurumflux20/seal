@@ -294,6 +294,50 @@ $250,000 is never automatic; and one `revoke` stops even the $200 path. It
 ends on the Range Report, which states approvals in money — approved and
 rejected totals — rather than a count of event kinds.
 
+## Portable receipts — evidence that leaves the building
+
+The dispute that matters spans three parties — the user who authorised an
+agent, the operator who ran it, and the merchant who got paid — and each holds
+a database the other two cannot read. `seal verify` answers "did this run
+exactly once, and did the world confirm it?", but only to someone holding the
+DSN, which is to say only to the party being asked to prove its own innocence.
+
+A portable receipt is that answer as a file. Certs are hashed over
+**RFC 8785 canonical JSON** and (with a key configured) **Ed25519-signed** at
+write time, so a counterparty verifies them with *no database, no network, and
+none of our code* — [`docs/verify-receipt.mjs`](docs/verify-receipt.mjs) does
+it in ~30 lines of Node:
+
+```bash
+pip install 'seal-kernel[signing]'
+python -m seal keygen                     # SEAL_SIGNING_KEY= secret · public key= publish it
+python -m seal export --intent <id> > receipt.json
+python -m seal verify-receipt receipt.json --pubkey <hex>    # needs NO DSN
+node docs/verify-receipt.mjs receipt.json <hex>              # or no Python at all
+```
+
+Honest limits, on the verdict itself: a pinned-key pass proves *these certs
+were produced by the key holder and are unaltered* — it cannot prove
+completeness (whether other certs exist takes the chain check against the
+store), and an unpinned pass proves internal consistency only, never
+authorship. Signing is opt-in; an unsigned store keeps working exactly as
+before, and v1 certs keep verifying next to v2 forever.
+
+## settle() — deduplication is not settlement
+
+Idempotency keys make retrying the *same request* safe. They do not answer
+what happened after a timeout where the provider may already have acted. That
+intent sits `open`, and before `settle()` the only resolution was implicit — a
+future `admit(heal_with=…)` some caller might never make. Now it is one verb:
+
+```python
+gateway.settle(intent)      # uses the path's registered witness
+# CONFIRMED_ONE → healed to WORLD_FINAL, budget reservation settled
+# ABSENT        → claim released for a clean retry, budget returned
+# MULTIPLE      → WORLD_DIVERGED on the chain, domain frozen
+# UNKNOWN       → unresolved, loudly — the claim stands, nothing is guessed
+```
+
 ## What a Seal cert does and does not claim
 
 A cert proves the action was **admitted exactly once at this gateway** and that
