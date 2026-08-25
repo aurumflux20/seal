@@ -53,6 +53,14 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("keygen", help="mint an Ed25519 signing keypair")
 
+    ob = sub.add_parser(
+        "obligations",
+        help="sweep declared duties for silence — exit 1 on any open breach",
+    )
+    ob.add_argument("--dsn", default=os.environ.get("SEAL_DSN"),
+                    help="Postgres DSN (or set SEAL_DSN)")
+    ob.add_argument("--json", action="store_true", help="machine-readable output")
+
     args = p.parse_args(argv)
 
     if args.cmd == "verify":
@@ -94,6 +102,28 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"  - {prob}")
             print(f"  {report['note']}")
         return 0 if report["ok"] else 1
+
+    if args.cmd == "obligations":
+        if not args.dsn:
+            print("seal obligations: no DSN (pass --dsn or set SEAL_DSN)",
+                  file=sys.stderr)
+            return 2
+        from .obligation import Obligations
+        obs = Obligations(Seal(args.dsn))
+        obs.setup()
+        report = obs.sweep()
+        if args.json:
+            print(json.dumps(report, sort_keys=True))
+        else:
+            print(f"duties {report['verdict'].upper()} — "
+                  f"{report['duties_checked']} checked, "
+                  f"{report['open_breaches']} open breach(es)")
+            for item in report["items"]:
+                if item["status"] != "satisfied":
+                    print(f"  - [{item['status']}] {item['action']} "
+                          f"({item.get('key') or 'window ' + str(item.get('window'))})")
+        # Cron-friendly: silence that should have been work is a red exit.
+        return 0 if report["verdict"] == "met" else 1
 
     if args.cmd == "keygen":
         try:

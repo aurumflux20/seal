@@ -55,7 +55,13 @@ _CONFIRMED_RATIO_REQUIRED = {L1: 0.0, L2: 0.5, L3: 0.8, L4: 0.9, L5: 0.95}
 # proof that nothing moved money behind the gateway's back.
 _SWEEP_REQUIRED_FROM = L3
 
-SUSPENDING_EVENTS = ("out_of_band_spend", "diverged", "revoked")
+# A breached obligation suspends exactly like out-of-band spend or a
+# divergence: a path that went SILENT on declared work has broken its record
+# as surely as one that double-charged. Before this, an L5 agent that simply
+# stopped working kept L5 forever — omission was the one sin the licence
+# could not see.
+SUSPENDING_EVENTS = ("out_of_band_spend", "diverged", "revoked",
+                     "obligation_breached")
 
 
 @dataclass

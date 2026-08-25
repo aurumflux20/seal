@@ -338,6 +338,47 @@ gateway.settle(intent)      # uses the path's registered witness
 # UNKNOWN       → unresolved, loudly — the claim stands, nothing is guessed
 ```
 
+## Obligations — the alarm for what an agent FAILS to do
+
+Every guard above — and every agent-safety tool we know of — watches
+*commission*: the double-charge, the overspend, the contradiction. Nothing
+watches *omission*. An agent that crashed, lost its key, or silently stopped
+looks exactly like an agent with nothing to do — until payroll doesn't go
+out, or the refund that was legally due in 14 days quietly doesn't happen.
+
+This repo already refuses that failure mode for its tests (`conftest.py`: a
+run where everything skipped is not a pass). Obligations apply the same
+sentence to production money. It is the dual of the reconcile sweep:
+
+```
+reconcile:    provider effects − admitted intents = out-of-band  (did too much)
+obligations:  declared duties  − sealed intents   = BREACH       (did too little)
+```
+
+```python
+from seal.obligation import Obligations
+obs = Obligations(seal); obs.setup()
+
+# at decision time, the agent binds its future self:
+obs.expect(action="refund", key="return-123", due_in_sec=14*86400,
+           description="statutory refund window for return #123")
+
+# the business heartbeat:
+obs.expect_recurring(action="renewal", every_sec=86400, min_count=1)
+
+obs.sweep()   # or: python -m seal obligations   (exit 1 on any open breach)
+```
+
+What makes a miss more than a dashboard row: **the breach itself is appended
+to the tamper-evident chain** (deleting it breaks every hash after it), and
+`obligation_breached` is a **licence-suspending event** — a path that goes
+silent on declared work loses its earned autonomy exactly like a path that
+double-charged. Declaring duties is open to agents (`seal_expect` over MCP);
+cancelling one is an operator act with no agent-facing tool, because an
+obligation an agent could cancel is not an obligation. A breach deliberately
+does *not* freeze the path — a frozen refund path cannot cure a missed
+refund; the levers are evidence, alarm, and the licence.
+
 ## What a Seal cert does and does not claim
 
 A cert proves the action was **admitted exactly once at this gateway** and that

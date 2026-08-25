@@ -228,6 +228,37 @@ TOOLS = [
         {"intent": {"type": "string"}},
         ["intent"],
     ),
+    # Declaring a duty is the ONE obligation verb agents get. There is
+    # deliberately no seal_obligation_cancel and no seal_obligation_resolve:
+    # an agent that could release its own duties has no duties — the same
+    # rule as unfreeze and mandate release. Cancellation is an operator act.
+    _tool(
+        "seal_expect",
+        "Bind yourself (or the system) to future work: declare that an effect "
+        "(action, key) MUST be sealed by a deadline. If it has not happened "
+        "by then, the miss is recorded on the tamper-evident chain and the "
+        "path's autonomy licence is suspended. Use this at decision time — "
+        "e.g. the moment you accept a return, declare the refund duty. "
+        "Declaring duties is always safe; only an operator can cancel one.",
+        {
+            "action": {"type": "string", "description": "The action that must happen, e.g. 'refund'."},
+            "key": {"type": "string", "description": "Stable key of the expected intent, e.g. 'return-123'."},
+            "due_in_sec": {"type": "number", "description": "Deadline, seconds from now."},
+            "grace_sec": {"type": "number", "description": "Grace period after the deadline before a miss is a breach."},
+            "description": {"type": "string", "description": "Human-readable statement of the duty."},
+            "by": {"type": "string", "description": "Who is declaring, e.g. your agent id."},
+        },
+        ["action", "key", "due_in_sec"],
+    ),
+    _tool(
+        "seal_obligations",
+        "Sweep every declared duty for silence: work that should have been "
+        "sealed by now and wasn't. verdict=met only when nothing is owed, "
+        "missed, or unconfirmed. Breaches are already on the chain — this "
+        "reports them, it cannot hide them.",
+        {},
+        [],
+    ),
 ]
 
 
@@ -358,6 +389,22 @@ class Server:
             return self.seal.verify_chain()
         if name == "seal_incident_receipt":
             return self.seal.incident_receipt(args["intent"])
+        if name == "seal_expect":
+            from .obligation import Obligations
+            obs = Obligations(self.seal)
+            obs.setup()
+            return obs.expect(
+                action=args["action"], key=args["key"],
+                due_in_sec=float(args["due_in_sec"]),
+                grace_sec=float(args.get("grace_sec", 0.0)),
+                description=args.get("description"),
+                by=args.get("by", "agent"),
+            )
+        if name == "seal_obligations":
+            from .obligation import Obligations
+            obs = Obligations(self.seal)
+            obs.setup()
+            return obs.sweep()
         raise SealError(f"unknown tool {name!r}")
 
     # ── JSON-RPC plumbing ─────────────────────────────────────────────────
