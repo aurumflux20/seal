@@ -6,6 +6,23 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
 authors = [{ name = "AurumFlux", email = "hello@aurumflux.co" }]
+keywords = [
+    "agents", "exactly-once", "idempotency", "payments", "mcp",
+    "settlement", "audit", "tamper-evident", "double-charge", "safety",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: System :: Distributed Computing",
+    "Topic :: Security",
+]
 dependencies = ["psycopg[binary]>=3.1"]
 
 [project.optional-dependencies]
@@ -13,6 +30,9 @@ signing = ["cryptography>=41"]
 
 [project.urls]
 Homepage = "https://github.com/aurumflux20/seal"
+Documentation = "https://github.com/aurumflux20/seal#readme"
+Changelog = "https://github.com/aurumflux20/seal/releases"
+Issues = "https://github.com/aurumflux20/seal/issues"
 
 [build-system]
 requires = ["setuptools>=68"]

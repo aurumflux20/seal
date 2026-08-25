@@ -1,0 +1,22 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.aurumflux20/seal",
+  "title": "Seal",
+  "description": "Exactly-once admission for irreversible agent actions: agents get tickets, never credentials; every effect is world-confirmed and chained into tamper-evident, signable receipts; declared duties breach loudly when missed.",
+  "version": "0.3.0",
+  "repository": {
+    "url": "https://github.com/aurumflux20/seal",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "seal-kernel",
+      "version": "0.3.0",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}
