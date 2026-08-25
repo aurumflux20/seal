@@ -407,3 +407,6 @@ not part of this repo; different package, different git history.
 [Business Source License 1.1](LICENSE): read it, run it, use it in production
 internally (commercial included) — just don't resell it as a hosted service.
 Converts to Apache-2.0 on 2030-08-12.
+
+---
+mcp-name: io.github.aurumflux20/seal
