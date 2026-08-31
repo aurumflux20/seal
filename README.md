@@ -36,6 +36,11 @@ SEAL_DSN="..." python3 license_demo.py     # watch a path earn L3 and lose it
 Slow to earn, instant to lose — the only shape that makes a track record mean
 anything. The full level definitions: [docs/AUTONOMY-LEVELS.md](docs/AUTONOMY-LEVELS.md).
 
+Seal's ambiguous-outcome doctrine — *"could not determine" is terminal, never
+absent* — is now §4.3 of the draft [MCP retry-safety proposal](https://github.com/YoadElkayam/mcp-fuse/tree/main/sep),
+co-authored by us, with our [conformance battery](https://github.com/aurumflux20/hostile-facilitator)
+as its test suite.
+
 ## Underneath: exactly-once admission
 
 Two different agents, on two different machines, both decide to charge order 123
