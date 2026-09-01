@@ -26,6 +26,21 @@ last two weeks (one a company doing 1M+ paid API calls/month), and two more orgs
 before that. The trail is our GitHub history — including the times we were wrong
 and said so.
 
+## Two ways in
+
+**1 · Retry-Safety Review — $1,200, one click, refunded in full if we find nothing.**
+The fastest way to find out whether you have this problem at all. We read one money
+path for the ambiguous-failure defect — the settle that times out after it landed,
+the retry that mints a fresh nonce, the reservation released on a failure that
+wasn't one — and send a written report tied to your own file and line numbers. Five
+working days, written only. [Book it](https://buy.stripe.com/28E7sL91C9naapQbBVdIA0l);
+if we find nothing you pay nothing and keep the report saying your guards hold.
+
+**2 · Money-Path Assurance — $9,000.** The same reading, taken all the way to an
+attestation you can hand a board, auditor, or insurer — with a conformance run
+against the draft retry-safety standard we co-authored (an unadopted MCP proposal,
+SEP working draft). Detailed just below.
+
 ## The engagement
 
 **Money-Path Assurance — fixed scope, $9,000.** We take one production money path

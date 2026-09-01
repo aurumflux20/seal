@@ -28,11 +28,15 @@ Nobody types the level.**
 SEAL_DSN="..." python3 license_demo.py     # watch a path earn L3 and lose it
 ```
 
-> **Can you prove your agents won't double-charge a customer?** We do
-> [Money-Path Assurance](SUPPORT.md) — we verify one production money path against
-> the retry-safety standard we co-authored, and give you the attestation to show
-> a board, an auditor, or an insurer. Fixed scope, no invoice if we find nothing.
-> For a fast self-check first, [hostile-facilitator](https://github.com/aurumflux20/hostile-facilitator) tells you in 60 seconds.
+> **Can you prove your agents won't double-charge a customer?** Start with a
+> **$1,200 Retry-Safety Review** — we read one money path and report what we find,
+> refunded in full if that's nothing. Or take the full **$9,000
+> [Money-Path Assurance](SUPPORT.md)**: we verify one production money path against
+> the draft retry-safety standard we co-authored (an unadopted MCP proposal) and
+> give you the attestation to show a board, an auditor, or an insurer — fixed scope,
+> no invoice if we find nothing. For a fast self-check first,
+> [hostile-facilitator](https://github.com/aurumflux20/hostile-facilitator) tells
+> you in 60 seconds.
 
 Slow to earn, instant to lose — the only shape that makes a track record mean
 anything. The full level definitions: [docs/AUTONOMY-LEVELS.md](docs/AUTONOMY-LEVELS.md).
