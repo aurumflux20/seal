@@ -293,7 +293,7 @@ def load_gateway(seal: Seal, module_name: str | None = None):
 
 
 class Server:
-    def __init__(self, seal: Seal, gateway=None):
+    def __init__(self, seal: Seal | None = None, gateway=None):
         self.seal = seal
         self.gateway = gateway
 
@@ -310,6 +310,12 @@ class Server:
 
     # ── tool dispatch ─────────────────────────────────────────────────────
     def call(self, name: str, args: dict) -> Any:
+        if self.seal is None:
+            raise RuntimeError(
+                "SEAL_DSN not set: this server admits actions against a Postgres "
+                "database. Introspection (initialize / tools/list) works without it, "
+                "but calling a tool requires SEAL_DSN — set it and reconnect."
+            )
         if name in ("seal_propose", "seal_execute", "seal_paths"):
             if self.gateway is None:
                 raise SealError(
@@ -416,7 +422,7 @@ class Server:
             return self._ok(mid, {
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "seal-mcp", "version": "0.2.0"},
+                "serverInfo": {"name": "seal-mcp", "version": "0.3.1"},
             })
         if method.startswith("notifications/"):
             return None  # notifications get no response
@@ -461,30 +467,37 @@ class Server:
 
 def main() -> int:
     dsn = os.environ.get("SEAL_DSN")
-    if not dsn:
-        print("seal-mcp: SEAL_DSN not set", file=sys.stderr)
-        return 2
-    seal = Seal(dsn)
-    seal.setup()
 
-    # A misconfigured executor module must stop the server, not silently
-    # downgrade it to admission-only. Starting quietly in the weaker mode is
-    # how an operator ends up believing agents never touch the credential
-    # while they quietly do.
-    try:
-        gateway = load_gateway(seal)
-    except Exception as e:
-        print(f"seal-mcp: failed to load SEAL_EXECUTORS: {type(e).__name__}: {e}",
-              file=sys.stderr)
-        return 2
+    seal = None
+    gateway = None
+    if dsn:
+        seal = Seal(dsn)
+        seal.setup()
 
-    if gateway is not None:
-        print(f"seal-mcp: gateway mode — {len(gateway._executors)} path(s): "
-              f"{', '.join(sorted(gateway._executors))}", file=sys.stderr)
+        # A misconfigured executor module must stop the server, not silently
+        # downgrade it to admission-only. Starting quietly in the weaker mode is
+        # how an operator ends up believing agents never touch the credential
+        # while they quietly do.
+        try:
+            gateway = load_gateway(seal)
+        except Exception as e:
+            print(f"seal-mcp: failed to load SEAL_EXECUTORS: {type(e).__name__}: {e}",
+                  file=sys.stderr)
+            return 2
+
+        if gateway is not None:
+            print(f"seal-mcp: gateway mode — {len(gateway._executors)} path(s): "
+                  f"{', '.join(sorted(gateway._executors))}", file=sys.stderr)
+        else:
+            print("seal-mcp: admission-only mode — callers run effects themselves "
+                  "and must hold their own credentials. Set SEAL_EXECUTORS for "
+                  "gateway mode.", file=sys.stderr)
     else:
-        print("seal-mcp: admission-only mode — callers run effects themselves "
-              "and must hold their own credentials. Set SEAL_EXECUTORS for "
-              "gateway mode.", file=sys.stderr)
+        # No database configured: still start, so a host — or a registry's
+        # introspection probe — can connect and read the tool list. Any actual
+        # tool call returns a clear error until SEAL_DSN is set (see Server.call).
+        print("seal-mcp: introspection-only — SEAL_DSN not set. initialize and "
+              "tools/list work; calling a tool needs a database.", file=sys.stderr)
 
     server = Server(seal, gateway)
     for line in sys.stdin:
