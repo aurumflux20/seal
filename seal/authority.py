@@ -127,9 +127,16 @@ class Gateway:
     """
 
     def __init__(self, seal: Seal, ticket_key: bytes | None = None,
-                 ticket_ttl_sec: float = 300.0):
+                 ticket_ttl_sec: float = 300.0, *, earned_autonomy: bool = False):
         self.seal = seal
         self.clearance = Clearance(seal)
+        # EARNED AUTONOMY. Off by default so no existing integration changes
+        # behaviour. On, the gateway lets a path move money unattended only to
+        # the extent its own record has earned (licence L3+), and hands the
+        # wheel back to a human the instant it is suspended or an execution's
+        # outcome is unknown. The licence decides how much room a path has
+        # INSIDE the operator's thresholds — never more. See license.py.
+        self._earned_autonomy = bool(earned_autonomy)
         # The ticket key never leaves the gateway. Generated if not supplied so
         # a misconfigured deployment fails closed rather than using a default.
         self._key = ticket_key or os.environ.get("SEAL_TICKET_KEY", "").encode() or secrets.token_bytes(32)
@@ -228,16 +235,49 @@ class Gateway:
                 return {"status": "already_done", "intent": adm.intent, "cert": adm.cert}
             return {"status": "in_flight", "intent": adm.intent}
 
-        # GRADUATED CLEARANCE — only meaningful when the caller states an
-        # amount. A path's binary CLEARED does not, on its own, authorise a
-        # single amount above the auto-ceiling; that needs a second human. If
-        # this branch bails, release the admission (self.seal.fail) rather
-        # than leaving a claimed-but-unusable intent sitting open.
+        # EARNED AUTONOMY — engages only when the operator switched it on
+        # (Gateway(earned_autonomy=True)) and the caller states an amount. The
+        # licence answers whether this PATH may move money unattended right
+        # now: it must have earned L3+ from its own sealed, world-confirmed
+        # record; must not be suspended; and must have no execution with an
+        # unknown outcome still open. Any of those hands the wheel back to a
+        # human. A satisfied maker-checker approval IS that human, so an
+        # approval_id opens the same door graduated clearance uses. Nobody
+        # types the level — the record earns it, and loses it.
+        licence_tier = None
+        configured = False
+        tier = None
+        appr = None
         if amount is not None:
             from .graduated import (
-                APPROVE, AUTO, APPROVED, GraduatedClearance, GraduatedError,
+                APPROVE, AUTO, APPROVED, LICENCE, GraduatedClearance, GraduatedError,
                 ApprovalConsumed, ApprovalNotSatisfied,
             )
+            if self._earned_autonomy:
+                from .license import LicenceEngine
+                verdict = LicenceEngine(self.seal).requires_human(path, amount)
+                if verdict["human_required"]:
+                    if approval_id is None:
+                        self.seal.fail(adm.intent, adm.fence, "needs licence approval")
+                        # Counted, like every other refusal: the Range Report
+                        # must show the wheel being handed back, not silence.
+                        self.seal.record_event(
+                            "approval_required", path=path, intent=adm.intent,
+                            detail={"amount": amount, "tier": LICENCE,
+                                    "level": verdict["level"],
+                                    "reason": verdict["reason"]},
+                        )
+                        return {"status": "needs_approval", "intent": adm.intent,
+                                "tier": LICENCE, "level": verdict["level"],
+                                "reason": verdict["reason"],
+                                "needs": verdict.get("needs", [])}
+                    licence_tier = LICENCE
+
+            # GRADUATED CLEARANCE — only meaningful when the caller states an
+            # amount. A path's binary CLEARED does not, on its own, authorise a
+            # single amount above the auto-ceiling; that needs a second human. If
+            # this branch bails, release the admission (self.seal.fail) rather
+            # than leaving a claimed-but-unusable intent sitting open.
             gc = GraduatedClearance(self.seal)
             # Graduated clearance only engages for a path an operator has
             # explicitly configured with set_thresholds(). Passing `amount` to
@@ -251,7 +291,10 @@ class Gateway:
             # it to guard.
             configured = gc.get_thresholds(path) is not None
             tier = gc.tier_for(path, amount) if configured else AUTO
-            if configured and tier != AUTO:
+            # A human is needed when the AMOUNT tier says so, or when the
+            # LICENCE said so above (in which case approval_id is present and
+            # must be validated and consumed exactly like a graduated one).
+            if (configured and tier != AUTO) or licence_tier is not None:
                 if approval_id is None:
                     self.seal.fail(adm.intent, adm.fence, "needs graduated approval")
                     # An agent refused permission to spend is a countable
@@ -307,10 +350,10 @@ class Gateway:
         from .mandate import Mandates
         mandate = Mandates(self.seal).mint(
             intent=adm.intent, path=path, args_digest=args_dig, amount=amount,
-            tier=(tier if amount is not None and configured else None),
+            tier=(licence_tier or (tier if configured else None)) if amount is not None else None,
             approval_id=approval_id,
             approvers=([v["approver"] for v in appr["votes"] if v["decision"] == APPROVE]
-                      if amount is not None and configured and tier != AUTO else None),
+                      if appr is not None else None),
             clearance=Clearance(self.seal).status(path)["effective"],
         )
 
@@ -412,6 +455,15 @@ class Gateway:
             # time. Keep the claim and the budget: the intent stays open, its
             # lease expires, and the witness/reconcile path decides whether the
             # effect landed. Refusing to guess is the whole product.
+            #
+            # Record it, so the path's autonomy licence can see it: while this
+            # intent stays open the licence HOLDS unattended spend on the path
+            # (the car pulls over), and lifts the hold itself once settle()
+            # has asked the provider what happened. Not a breach — a pause.
+            self.seal.record_event(
+                "ambiguous_outcome", path=t.path, intent=t.intent,
+                detail={"cause": repr(e)},
+            )
             raise AmbiguousOutcome(
                 f"executor for intent {t.intent} failed AFTER the provider was "
                 f"called; the effect may have fired. The claim is intentionally "

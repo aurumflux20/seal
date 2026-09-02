@@ -52,6 +52,10 @@ from .core import Seal, SealError
 AUTO = "AUTO"
 DUAL = "DUAL"
 ALWAYS_HUMAN = "ALWAYS_HUMAN"
+# Not an amount tier: the path's earned-autonomy licence — not the number —
+# demanded a human (unlicensed, suspended, or holding on an unknown outcome).
+# Approved and consumed through exactly the same maker-checker machinery.
+LICENCE = "LICENCE"
 
 APPROVE = "approve"
 REJECT = "reject"
@@ -146,10 +150,14 @@ class GraduatedClearance:
 
     # ── requesting approval ─────────────────────────────────────────────
     def request(self, path: str, amount: float, maker: str, intent: str,
-               ttl_sec: float = DEFAULT_TTL_SEC) -> dict:
-        tier = self.tier_for(path, amount)
-        if tier == AUTO:
-            raise GraduatedError(f"amount {amount} on {path!r} is AUTO tier — no approval needed")
+               ttl_sec: float = DEFAULT_TTL_SEC, *, tier: str | None = None) -> dict:
+        """Open an approval. The tier is normally derived from the amount; pass
+        `tier=LICENCE` when the path's earned-autonomy licence — not the amount
+        — is what demanded a human (the amount may well be AUTO-tier)."""
+        if tier is None:
+            tier = self.tier_for(path, amount)
+            if tier == AUTO:
+                raise GraduatedError(f"amount {amount} on {path!r} is AUTO tier — no approval needed")
         th = self.get_thresholds(path)
         required = th.required_approvers if th else 2
         now = time.time()

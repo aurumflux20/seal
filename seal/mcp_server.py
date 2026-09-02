@@ -118,9 +118,12 @@ GATEWAY_TOOLS = [
         "result. Do NOT retry.\n"
         "  status=in_flight      -> another caller holds the claim. Stand down "
         "and retry later.\n"
-        "  status=needs_approval -> the amount is above the auto-clear ceiling "
-        "and needs human approvers. You cannot approve it yourself; report the "
-        "returned intent to your operator.\n\n"
+        "  status=needs_approval -> a human must approve first. Either the "
+        "amount is above the auto-clear ceiling (tier DUAL/ALWAYS_HUMAN), or — "
+        "when earned autonomy is on — this path has not yet EARNED unattended "
+        "money authority, is suspended, or is holding after an execution with "
+        "an unknown outcome (tier LICENCE; `reason` says which). You cannot "
+        "approve it yourself; report the returned intent to your operator.\n\n"
         "Always pass a stable `key` (e.g. 'invoice-777') for money-class "
         "actions: retrying with the same key but different args is refused as "
         "a conflict rather than becoming a second payment.",
@@ -149,8 +152,10 @@ GATEWAY_TOOLS = [
     ),
     _tool(
         "seal_paths",
-        "List the action paths this gateway can execute, and whether each is "
-        "currently cleared to run. Call this first to discover what is allowed.",
+        "List the action paths this gateway can execute, whether each is "
+        "currently cleared to run, and the autonomy licence each has EARNED "
+        "(L0 OBSERVED … L5 AUTONOMOUS, plus whether it may run unattended right "
+        "now). Call this first to discover what is allowed.",
         {},
         [],
     ),
@@ -262,6 +267,10 @@ TOOLS = [
 ]
 
 
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def load_gateway(seal: Seal, module_name: str | None = None):
     """Build a Gateway from an operator-provided executor module.
 
@@ -282,7 +291,10 @@ def load_gateway(seal: Seal, module_name: str | None = None):
         raise SealError(
             f"SEAL_EXECUTORS module {module_name!r} has no register(gateway) function"
         )
-    gw = Gateway(seal)
+    # SEAL_EARNED_AUTONOMY=1 turns on earned autonomy: each path may move
+    # money unattended only to the extent its own record has earned (L3+), and
+    # hands the wheel back to a human on suspension or an unknown outcome.
+    gw = Gateway(seal, earned_autonomy=_env_flag("SEAL_EARNED_AUTONOMY"))
     register(gw)
     if not gw._executors:
         raise SealError(
@@ -325,13 +337,31 @@ class Server:
 
         if name == "seal_paths":
             from .clearance import Clearance
+            from .license import LicenceEngine
             cl = Clearance(self.seal)
+            eng = LicenceEngine(self.seal)
+            paths = []
+            for p in sorted(self.gateway._executors):
+                lic = eng.evaluate(p)
+                paths.append({
+                    "path": p,
+                    "clearance": cl.status(p)["effective"],
+                    "licence": {
+                        "level": lic.level, "name": lic.name,
+                        "unattended": lic.unattended,
+                        "suspended": lic.suspended, "held": lic.held,
+                        "reason": lic.suspended_reason or lic.held_reason,
+                        "next_level": lic.next_level, "needs": lic.needs,
+                    },
+                })
             return {
-                "paths": [
-                    {"path": p, "clearance": cl.status(p)["effective"]}
-                    for p in sorted(self.gateway._executors)
-                ],
-                "note": "propose against these paths; the gateway holds the credentials",
+                "paths": paths,
+                "earned_autonomy": self.gateway._earned_autonomy,
+                "note": "propose against these paths; the gateway holds the credentials. "
+                        "`licence` is the autonomy each path has EARNED from its own "
+                        "record (L0 OBSERVED … L5 AUTONOMOUS); when earned_autonomy is "
+                        "on, money actions run unattended only at L3+ and never while "
+                        "suspended or held.",
             }
 
         if name == "seal_propose":
@@ -422,7 +452,7 @@ class Server:
             return self._ok(mid, {
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "seal-mcp", "version": "0.3.1"},
+                "serverInfo": {"name": "seal-mcp", "version": "0.4.0"},
             })
         if method.startswith("notifications/"):
             return None  # notifications get no response

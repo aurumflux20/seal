@@ -74,6 +74,13 @@ class Licence:
     clean_sweeps: int = 0
     suspended: bool = False
     suspended_reason: str | None = None
+    # HELD is not suspended. A suspension is a breach — the record is broken and
+    # only an operator can clear it. A hold is the car pulling over: an
+    # execution on this path has an outcome nobody knows yet (a timeout after
+    # the provider was called), so unattended spend pauses until settle() asks
+    # the world what happened. The level is untouched; the hold lifts itself.
+    held: bool = False
+    held_reason: str | None = None
     evidence: dict[str, Any] = field(default_factory=dict)
     next_level: str | None = None
     needs: list[str] = field(default_factory=list)
@@ -85,7 +92,7 @@ class Licence:
     @property
     def unattended(self) -> bool:
         """May this path execute money actions without a human in the loop?"""
-        return (not self.suspended) and self.level in (L3, L4, L5)
+        return (not self.suspended) and (not self.held) and self.level in (L3, L4, L5)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -95,6 +102,7 @@ class Licence:
             "confirmed_ratio": round(self.confirmed_ratio, 3),
             "clean_sweeps": self.clean_sweeps, "suspended": self.suspended,
             "suspended_reason": self.suspended_reason,
+            "held": self.held, "held_reason": self.held_reason,
             "next_level": self.next_level, "needs": self.needs,
             "evidence": self.evidence,
         }
@@ -186,6 +194,26 @@ class LicenceEngine:
             needs.append("one clean out-of-band sweep (no spend behind the gateway)")
         return nxt, needs
 
+    def _open_ambiguities(self, path: str) -> list[str]:
+        """Intents on this path whose execution reached the provider and then
+        failed ambiguously, and which nobody has settled yet.
+
+        Read from STATE, not from a resolution event: an intent is held while
+        its `ambiguous_outcome` event exists AND its claim is still `open`.
+        settle() moves it out of that state on every branch — healed → sealed,
+        released → deleted, diverged → suspended — so the hold lifts the moment
+        the world has answered, with nothing extra to record or forget.
+        """
+        with self.seal._connect(autocommit=True) as c:
+            rows = c.execute(
+                "SELECT DISTINCT e.intent FROM seal_events e "
+                "JOIN seal_intents i ON i.intent = e.intent "
+                "WHERE e.kind = 'ambiguous_outcome' AND e.path = %s "
+                "AND i.state = 'open'",
+                (path,),
+            ).fetchall()
+        return [r[0] for r in rows]
+
     def evaluate(self, path: str, *, since: float | None = None) -> Licence:
         """The licence this path has earned, from evidence alone."""
         h = self._history(path, since)
@@ -209,12 +237,31 @@ class LicenceEngine:
 
         level = self._earned(proven, ratio, h["clean_sweeps"])
         nxt, needs = self._shortfall(level, proven, ratio, h["clean_sweeps"])
+        evidence: dict[str, Any] = {
+            "proven_effects": proven, "world_confirmed": confirmed,
+            "clean_sweeps": h["clean_sweeps"],
+        }
+
+        # The pull-over. An execution on this path was dispatched and its
+        # outcome is unknown. The level stands — nothing has been proven wrong —
+        # but no further money moves unattended until settle() has asked the
+        # provider what actually happened. Guessing here IS the double-charge.
+        open_amb = self._open_ambiguities(path)
+        held = bool(open_amb)
+        held_reason = None
+        if held:
+            evidence["open_ambiguous_intents"] = open_amb
+            held_reason = (
+                f"hands off: {len(open_amb)} execution(s) on this path reached the "
+                "provider with an unknown outcome — settle (witness) them before "
+                "any further unattended spend"
+            )
+
         return Licence(
             path=path, level=level, proven=proven, confirmed=confirmed,
             confirmed_ratio=ratio, clean_sweeps=h["clean_sweeps"],
-            evidence={"proven_effects": proven, "world_confirmed": confirmed,
-                      "clean_sweeps": h["clean_sweeps"]},
-            next_level=nxt, needs=needs,
+            held=held, held_reason=held_reason,
+            evidence=evidence, next_level=nxt, needs=needs,
         )
 
     def requires_human(self, path: str, amount: float,
@@ -229,6 +276,9 @@ class LicenceEngine:
         if lic.suspended:
             return {"human_required": True, "level": lic.level,
                     "reason": lic.suspended_reason}
+        if lic.held:
+            return {"human_required": True, "level": lic.level,
+                    "reason": lic.held_reason, "held": True}
         if not lic.unattended:
             return {"human_required": True, "level": lic.level,
                     "reason": f"{lic.name}: not yet licensed for unattended spend",

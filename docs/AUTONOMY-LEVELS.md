@@ -95,3 +95,38 @@ definition Seal is built and measured against.
 If you think a level is drawn in the wrong place, or a criterion is missing, the
 useful reply is a concrete one: which path, which evidence, what should have
 been required instead.
+
+---
+
+## The level drives the gateway (0.4.0)
+
+A level that is only *displayed* is a badge. Since 0.4.0 the licence is wired
+into the gateway's execute-or-ask decision, so the ruler above is enforced,
+not just reported:
+
+- **Enable it:** `Gateway(seal, earned_autonomy=True)`, or
+  `SEAL_EARNED_AUTONOMY=1` for the MCP server. Off by default — no existing
+  integration changes behaviour until the operator switches it on.
+- **The wheel is earned.** With it on, a money action (`propose(..., amount=…)`)
+  runs unattended only if the path's licence is L3+ and clean. Below that, the
+  gateway answers `needs_approval` with `tier: LICENCE` and the reason
+  (`L1 SUPERVISED: not yet licensed for unattended spend`, plus what it still
+  needs). Non-money actions are not gated — L1 semantics.
+- **Inside the operator's ceiling, never above.** Graduated thresholds still
+  apply on top: an L3 path over `auto_ceiling` still hits DUAL. The licence
+  decides how much room a path has *within* the operator's limits.
+- **Taken back instantly.** A suspension (out-of-band spend, divergence,
+  breached obligation) makes the very next money action need a human.
+- **The hold — pulling over.** When an execution reaches the provider and then
+  fails ambiguously (timeout, 5xx, dropped connection), the intent's claim
+  already stands so it cannot be blindly retried. Now the path also *holds*:
+  no further unattended spend until `settle()` has asked the provider what
+  happened. This is not a breach — the level is untouched — and it lifts by
+  itself the moment the outcome is known (healed, released, or diverged).
+  Guessing here is the double-charge; refusing to guess is the product.
+- **A human can always take the wheel.** Any action the licence refuses can be
+  approved for that one action through the maker-checker door
+  (`GraduatedClearance.request(..., tier=LICENCE)`), validated and consumed
+  exactly like a graduated approval — single-use, maker excluded, on the chain.
+- **The supervisor's view.** `seal_paths` (MCP) now reports each path's earned
+  level, whether it may run unattended right now, and — if not — why.

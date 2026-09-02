@@ -28,6 +28,18 @@ Nobody types the level.**
 SEAL_DSN="..." python3 license_demo.py     # watch a path earn L3 and lose it
 ```
 
+**Since 0.4.0 the licence drives the wheel, not just the dashboard.** Turn on
+earned autonomy — `Gateway(seal, earned_autonomy=True)`, or
+`SEAL_EARNED_AUTONOMY=1` for the MCP server — and the gateway lets a path move
+money unattended only to the extent its own record has earned (L3+), inside
+the operator's ceilings, never above them. Three things hand the wheel back to
+a human instantly: a path that hasn't earned it yet, a suspension (money moved
+behind the gateway's back), and a **hold** — an execution reached the provider
+and its outcome is unknown, so the path pulls over until `settle()` has asked
+the provider what happened. The hold lifts by itself once the world answers.
+A human can still approve any single action through the same maker-checker
+door (`tier=LICENCE`). Off by default: nothing changes until you switch it on.
+
 > **Can you prove your agents won't double-charge a customer?** Start with a
 > **$1,200 Retry-Safety Review** — we read one money path and report what we find,
 > refunded in full if that's nothing. Or take the full **$9,000
