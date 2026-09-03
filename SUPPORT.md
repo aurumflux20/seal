@@ -21,10 +21,28 @@ gate — *"could not determine" is terminal, never "absent"* — is our doctrine
 now spec text. When we attest that a money path is safe, the attestation is
 measured against the standard we wrote.
 
-Public track record: two payment projects shipped fixes from our findings in the
-last two weeks (one a company doing 1M+ paid API calls/month), and two more orgs
-before that. The trail is our GitHub history — including the times we were wrong
-and said so.
+Public track record: six payment paths fixed from our findings, three of them
+this week — fastest 4.3 hours from report to release, one reproduced on a mainnet
+fork before the fix. Every row and its proof is on the
+[Retry-Safety Index](https://aurumflux.co/retry-safety/). The trail is our GitHub
+history — including the times we were wrong and said so.
+
+## What every finding in the report says
+
+A double-charge is never reported as just "found." Each one is tied to a line, and
+each one carries a verdict on **whose defect it is**, because that is the question
+your board, your auditor, and your customer will ask next:
+
+| Verdict | What it means | What follows |
+|---|---|---|
+| **Licensed-path defect** | Your money path itself turned an unknown outcome into a second payment — the settle that timed out after it landed, the retry that signed a fresh authorization, the guard that released on an error that wasn't one. | This is the finding. Fix attached, test attached, and it goes on the Index with credit when you ship. |
+| **Credential outside the path** | The extra charge was made by something holding the provider secret directly, bypassing every guard you built. Your guards held; the key didn't stay where the guards are. | Not a defect in the path. The report says so plainly, names the shape of the leak, and points at exclusive-authority — the pattern where agents hold single-use tickets and never the key. |
+| **Undetermined — held** | We could not establish from the code, the tests, or a reproduction whether the second record is possible. | It is reported as *undetermined*, never as *safe*, and never as *found*. Nothing on this path gets a clean verdict until it resolves. That is the same rule the standard's §4.3 imposes on the code — we hold ourselves to it in the report. |
+
+Where we can reproduce, the report states the number: one purchase, how much was
+collected, how much was owed. Where we cannot, it says *code read* and states its
+own ceiling. A line that mixes the two is a line you should not trust — from us
+or anyone.
 
 > **Public register:** the [Retry-Safety Index](https://aurumflux.co/retry-safety/) lists which agent-payment implementations pay once when the answer is lost — verified safe, found & fixed (with time-to-fix), and how to get verified. Every row links to its proof.
 
