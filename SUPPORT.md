@@ -26,6 +26,8 @@ last two weeks (one a company doing 1M+ paid API calls/month), and two more orgs
 before that. The trail is our GitHub history — including the times we were wrong
 and said so.
 
+> **Public register:** the [Retry-Safety Index](https://aurumflux.co/retry-safety/) lists which agent-payment implementations pay once when the answer is lost — verified safe, found & fixed (with time-to-fix), and how to get verified. Every row links to its proof.
+
 ## Two ways in
 
 **1 · Retry-Safety Review — $1,200, one click, refunded in full if we find nothing.**

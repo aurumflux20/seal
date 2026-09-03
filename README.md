@@ -1,5 +1,7 @@
 # seal
 
+> **Public register:** the [Retry-Safety Index](https://aurumflux.co/retry-safety/) lists which agent-payment implementations pay once when the answer is lost — verified safe, found & fixed (with time-to-fix), and how to get verified. Every row links to its proof.
+
 **Your agents earn the right to spend without you.**
 
 > Not an engineer? Read [docs/PLAIN-ENGLISH.md](docs/PLAIN-ENGLISH.md) instead —
