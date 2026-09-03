@@ -4,6 +4,28 @@
 
 **Your agents earn the right to spend without you.**
 
+**Seal is an MCP server** (`seal-mcp`, stdio, JSON-RPC 2.0) — and a Python
+library. It gives an MCP host **12 tools** for exactly-once execution of
+irreversible actions: `seal_propose`, `seal_execute`, `seal_paths` (gateway
+mode — the agent holds a single-use ticket, never the provider key), plus
+`seal_admit`, `seal_commit`, `seal_abort`, `seal_heartbeat`, `seal_get`,
+`seal_verify`, `seal_incident_receipt`, `seal_expect`, `seal_obligations`.
+
+```bash
+docker run -i ghcr.io/aurumflux20/seal          # or: python -m seal.mcp_server
+```
+
+It starts in **introspection-only mode with no environment** — `initialize` and
+`tools/list` answer with no database, so a host or registry probe can connect
+immediately. Set `SEAL_DSN` to a Postgres DSN to actually admit actions, and
+`SEAL_EXECUTORS=your.module` for gateway mode.
+
+```jsonc
+// claude_desktop_config.json
+{ "mcpServers": { "seal": { "command": "python", "args": ["-m", "seal.mcp_server"],
+                            "env": { "SEAL_DSN": "postgres://..." } } } }
+```
+
 > Not an engineer? Read [docs/PLAIN-ENGLISH.md](docs/PLAIN-ENGLISH.md) instead —
 > the same thing with no jargon, including what we can't do.
 
