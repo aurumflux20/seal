@@ -44,6 +44,10 @@ collected, how much was owed. Where we cannot, it says *code read* and states it
 own ceiling. A line that mixes the two is a line you should not trust — from us
 or anyone.
 
+**[What a review returns →](docs/REVIEW-DELIVERABLE.md)** — the deliverable
+specified in full, with a real finding, real battery output, and the table above
+filled in. Read it before you pay, and check the report you get against it.
+
 > **Public register:** the [Retry-Safety Index](https://aurumflux.co/retry-safety/) lists which agent-payment implementations pay once when the answer is lost — verified safe, found & fixed (with time-to-fix), and how to get verified. Every row links to its proof.
 
 ## Two ways in
