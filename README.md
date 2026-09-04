@@ -4,6 +4,9 @@
 
 **Your agents earn the right to spend without you.**
 
+> **Free:** submit any client, facilitator, SDK or toolkit that moves money — yours or someone else's — and we read it and publish a verdict on the [Retry-Safety Index](https://aurumflux.co/retry-safety/) at no cost. Findings come back with the mechanism, the file and line, and a failing test. You are counted, never named, until you ship a fix. **[Submit for grading →](https://github.com/aurumflux20/hostile-facilitator/issues/new?template=submit.yml)**
+
+
 **Seal is an MCP server** (`seal-mcp`, stdio, JSON-RPC 2.0) — and a Python
 library. It gives an MCP host **12 tools** for exactly-once execution of
 irreversible actions: `seal_propose`, `seal_execute`, `seal_paths` (gateway
