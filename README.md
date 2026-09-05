@@ -4,6 +4,10 @@
 
 **Your agents earn the right to spend without you.**
 
+### Seal is not Coherence
+
+Seal and [EffectFence](https://github.com/aurumflux20/effectfence) stop an irreversible action from firing twice **while it happens** — runtime enforcement on money movement. [Coherence](https://github.com/aurumflux20/coherence) never touches your runtime; it reads the record **afterwards** and grades what an agent *claimed* against what it *proved*. **Prevention versus proof.** Different problems, different code, no overlap.
+
 > **Free:** submit any client, facilitator, SDK or toolkit that moves money — yours or someone else's — and we read it and publish a verdict on the [Retry-Safety Index](https://aurumflux.co/retry-safety/) at no cost. Findings come back with the mechanism, the file and line, and a failing test. You are counted, never named, until you ship a fix. **[Submit for grading →](https://github.com/aurumflux20/hostile-facilitator/issues/new?template=submit.yml)**
 
 
